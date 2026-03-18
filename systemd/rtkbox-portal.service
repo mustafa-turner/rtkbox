@@ -1,0 +1,17 @@
+[Unit]
+Description=rtkbox portal
+After=network-online.target NetworkManager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/zedf9p
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/zedf9p/.venv/bin/python -m rtkbox portal
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

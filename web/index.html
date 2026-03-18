@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>rtkbox</title>
+  <link rel="stylesheet" href="/app.css">
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  >
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div>
+        <h2>Select Mode</h2>
+        <div class="actions">
+          <select id="modeSelect"></select>
+          <button id="startButton" type="button">Start</button>
+          <button id="stopButton" type="button" class="secondary">Stop</button>
+        </div>
+      </div>
+      <div>
+        <h1>RTKbox ZED-F9P</h1>
+        <p id="statusLine">Loading...</p>
+        <nav class="menu">
+          <button type="button" class="menu-button active" data-view="control">Logs</button>
+          <button type="button" class="menu-button" data-view="config">Config</button>
+        </nav>
+      </div>
+    </header>
+
+
+
+    <section class="view active" id="view-control">
+      <div class="control-grid">
+        <div class="panel" id="positionPanel">
+          <h2>Position</h2>
+          <div class="coords">
+            <p><strong>Latitude:</strong> <span id="latValue">-</span></p>
+            <p><strong>Longitude:</strong> <span id="lonValue">-</span></p>
+            <p><strong>Source:</strong> <span id="coordSource">-</span></p>
+          </div>
+          <div id="map" class="map-box"></div>
+          <p id="mapHint" class="hint">Waiting for NMEA position...</p>
+        </div>
+
+        <div class="panel">
+          <h2>Logs</h2>
+          <p class="hint">Recent logs auto-refresh and stay capped to keep memory usage predictable.</p>
+          <pre id="logBox" class="log-box"></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-config">
+      <div class="network-toggle">
+        <button type="button" class="network-mode-button active" data-network-mode="ap">AP Mode</button>
+        <button type="button" class="network-mode-button" data-network-mode="wifi">Wi-Fi Mode</button>
+      </div>
+      <p class="hint">Switching this toggle now applies the selected network mode to the configured interface immediately.</p>
+
+      <form id="configForm" class="config-grid">
+        <section class="panel">
+          <h2>Serial</h2>
+          <label>Port<input name="serial.port" type="text"></label>
+          <label>Baud<input name="serial.baud" type="number"></label>
+        </section>
+
+        <section class="panel">
+          <h2>Base Local</h2>
+          <label>Bind Host<input name="base_local.bind_host" type="text"></label>
+          <label>Port<input name="base_local.port" type="number"></label>
+          <label>Format<input name="base_local.format" type="text"></label>
+        </section>
+
+        <section class="panel">
+          <h2>Caster</h2>
+          <label>Host<input name="caster.host" type="text"></label>
+          <label>Port<input name="caster.port" type="number"></label>
+          <label>Mountpoint<input name="caster.mountpoint" type="text"></label>
+          <label>User<input name="caster.user" type="text"></label>
+          <label>Password<input name="caster.password" type="text"></label>
+        </section>
+
+        <section class="panel">
+          <h2>Rover Local</h2>
+          <label>Host<input name="rover_local.host" type="text"></label>
+          <label>Port<input name="rover_local.port" type="number"></label>
+        </section>
+
+        <section class="panel">
+          <h2>Rover NTRIP</h2>
+          <label>Scheme
+            <select name="rover_ntrip.scheme">
+              <option value="ntrip">ntrip</option>
+              <option value="ntripc">ntripc</option>
+            </select>
+          </label>
+          <label>Host<input name="rover_ntrip.host" type="text"></label>
+          <label>Port<input name="rover_ntrip.port" type="number"></label>
+          <label>Mountpoint<input name="rover_ntrip.mountpoint" type="text"></label>
+          <label>User<input name="rover_ntrip.user" type="text"></label>
+          <label>Password<input name="rover_ntrip.password" type="text"></label>
+        </section>
+
+        <section class="panel">
+          <h2>Receiver Bridge</h2>
+          <label>Serial Port<input name="receiver_bridge.serial_port" type="text"></label>
+          <label>Baud<input name="receiver_bridge.baud" type="number"></label>
+          <label>Bind Host<input name="receiver_bridge.bind_host" type="text"></label>
+          <label>Port<input name="receiver_bridge.port" type="number"></label>
+          <p class="hint">Use this mode for `u-center` over TCP. The bridge relays data both ways between the network client and the receiver serial port.</p>
+        </section>
+
+        <section class="panel">
+          <h2>App</h2>
+          <label>Reconnect Delay<input name="app.reconnect_delay" type="number"></label>
+          <label>Portal Host<input name="app.portal_host" type="text"></label>
+          <label>Portal Port<input name="app.portal_port" type="number"></label>
+          <label>Startup Mode
+            <select name="app.startup_mode">
+              <option value="">disabled</option>
+              <option value="last">last used mode</option>
+              <option value="base-local">base-local</option>
+              <option value="base-ntrip">base-ntrip</option>
+              <option value="rover-local">rover-local</option>
+              <option value="rover-ntrip">rover-ntrip</option>
+              <option value="receiver-bridge">receiver-bridge</option>
+              <option value="nmea">nmea</option>
+            </select>
+          </label>
+          <label class="checkbox-row">
+            <input name="app.remember_last_mode" type="checkbox">
+            <span>Remember the last started mode</span>
+          </label>
+        </section>
+
+        <section class="panel network-panel" id="apPanel">
+          <h2>Access Point</h2>
+          <label>Interface<input name="ap.interface" type="text"></label>
+          <label>Connection Name<input name="ap.connection_name" type="text"></label>
+          <label>SSID<input name="ap.ssid" type="text"></label>
+          <label>Password<input name="ap.password" type="text"></label>
+          <label>Address<input name="ap.address" type="text"></label>
+          <p class="hint">Recommended future setup: `ap.interface = wlan0` and `wifi.interface = wlan1`.</p>
+        </section>
+
+        <section class="panel network-panel is-hidden" id="wifiPanel">
+          <h2>Wi-Fi Client</h2>
+          <label>Interface<input name="wifi.interface" type="text"></label>
+          <label>Connection Name<input name="wifi.connection_name" type="text"></label>
+          <label>
+            SSID
+            <div class="inline-row">
+              <select name="wifi.ssid" id="wifiSsidSelect"></select>
+              <button id="wifiScanButton" type="button" class="secondary">Refresh</button>
+            </div>
+          </label>
+          <label>Password<input name="wifi.password" type="text"></label>
+          <p class="hint">Applying Wi-Fi will make the Pi try to join this network. If the AP uses the same radio, this page may disconnect immediately.</p>
+        </section>
+      </form>
+
+      <div class="footer-actions">
+        <button id="saveConfigButton" type="button">Save Config</button>
+        <button id="applyApButton" type="button" class="secondary">Save + Apply AP</button>
+        <button id="applyWifiButton" type="button" class="secondary is-hidden">Save + Connect Wi-Fi</button>
+        <span id="saveMessage" class="hint"></span>
+      </div>
+    </section>
+  </main>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="/app.js"></script>
+</body>
+</html>

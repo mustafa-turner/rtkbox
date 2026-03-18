@@ -1,0 +1,54 @@
+serial:
+  port: ttyAMA0
+  baud: 115200
+
+base_local:
+  bind_host: ""
+  port: 5010
+  format: ""
+
+caster:
+  host: caster.example.com
+  port: 2101
+  mountpoint: YOUR_MOUNTPOINT
+  user: ""
+  password: YOUR_PASSWORD
+
+rover_local:
+  host: 192.168.1.10
+  port: 5010
+
+rover_ntrip:
+  scheme: ntrip
+  host: caster.example.com
+  port: 2101
+  mountpoint: YOUR_MOUNTPOINT
+  user: YOUR_USER
+  password: YOUR_PASSWORD
+
+receiver_bridge:
+  bind_host: ""
+  port: 5011
+  serial_port: /dev/ttyACM0
+  baud: 115200
+
+app:
+  reconnect_delay: 5
+  portal_host: 0.0.0.0
+  portal_port: 8080
+  remember_last_mode: true
+  startup_mode: last
+  last_mode: ""
+
+ap:
+  interface: wlan0
+  connection_name: rtkbox-ap
+  ssid: RTKbox
+  password: CHANGE_ME
+  address: 10.42.0.1/24
+
+wifi:
+  interface: wlan0
+  connection_name: rtkbox-client
+  ssid: YOUR_WIFI_SSID
+  password: YOUR_WIFI_PASSWORD
