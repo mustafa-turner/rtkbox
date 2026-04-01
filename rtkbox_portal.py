@@ -6,7 +6,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import mimetypes
-import subprocess
 import threading
 import time
 
@@ -37,9 +36,6 @@ class AppState(Runner):
     def snapshot(self):
         with self._lock:
             running = self.worker is not None and self.worker.is_alive()
-            cfg = self.load_config()
-            wifi_cfg = cfg.get("wifi", {})
-            ap_cfg = cfg.get("ap", {})
             recording = dict(self.runtime.get("recording") or {}) if self.runtime.get("recording") else None
             if recording and recording.get("started_at"):
                 recording["elapsed_seconds"] = int(max(0, time.time() - recording["started_at"]))
@@ -50,8 +46,6 @@ class AppState(Runner):
                 "logs": list(self.logs),
                 "log_limit": LOG_LIMIT,
                 "recording": recording,
-                "wifi_status": get_wifi_status(wifi_cfg.get("interface", "wlan0")),
-                "ap_status": get_wifi_status(ap_cfg.get("interface", "wlan0")),
             }
 
     def load_config(self):
@@ -126,10 +120,6 @@ class PortalHandler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             self._send_json(self.server.app_state.snapshot())
             return
-        if self.path == "/api/wifi/scan":
-            interface = self.server.app_state.load_config().get("wifi", {}).get("interface", "wlan0")
-            self._send_json({"networks": scan_wifi_networks(interface)})
-            return
         if self.path == "/api/recordings":
             self._send_json({"files": list_recordings(self.server.app_state.load_config())})
             return
@@ -151,30 +141,6 @@ class PortalHandler(BaseHTTPRequestHandler):
                 if mode not in MODES:
                     raise ValueError(f"unsupported mode: {mode}")
                 state.start_mode(mode)
-                self._send_json({"ok": True})
-                return
-            if self.path == "/api/network/mode":
-                config = validate_config_payload(data, state.load_config())
-                network_mode = str(data.get("network_mode", "")).strip()
-                if network_mode not in {"ap", "wifi"}:
-                    raise ValueError("network_mode must be 'ap' or 'wifi'")
-                state.save_config(config)
-                if network_mode == "ap":
-                    apply_access_point(config["ap"])
-                else:
-                    apply_wifi_client(config["wifi"])
-                self._send_json({"ok": True})
-                return
-            if self.path == "/api/wifi/apply":
-                config = validate_config_payload(data, state.load_config())
-                state.save_config(config)
-                apply_wifi_client(config["wifi"])
-                self._send_json({"ok": True})
-                return
-            if self.path == "/api/ap/apply":
-                config = validate_config_payload(data, state.load_config())
-                state.save_config(config)
-                apply_access_point(config["ap"])
                 self._send_json({"ok": True})
                 return
             if self.path == "/api/stop":
@@ -287,235 +253,7 @@ def validate_config_payload(data, existing=None):
             "startup_mode": str(data["app"].get("startup_mode", "last")),
             "last_mode": str(existing_app.get("last_mode", "")),
         },
-        "ap": {
-            "interface": str(data["ap"].get("interface", "wlan0")),
-            "connection_name": str(data["ap"].get("connection_name", "rtkbox-ap")),
-            "ssid": str(data["ap"].get("ssid", "RTKbox")),
-            "password": str(data["ap"].get("password", "")),
-            "address": str(data["ap"].get("address", "10.42.0.1/24")),
-        },
-        "wifi": {
-            "interface": str(data["wifi"].get("interface", "wlan0")),
-            "connection_name": str(data["wifi"].get("connection_name", "rtkbox-client")),
-            "ssid": str(data["wifi"].get("ssid", "")),
-            "password": str(data["wifi"].get("password", "")),
-        },
     }
-
-
-def run_nmcli(args):
-    result = subprocess.run(
-        ["/usr/bin/nmcli"] + args,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        if not detail:
-            detail = f"nmcli failed with exit code {result.returncode}"
-        raise RuntimeError(detail)
-    return result
-
-
-def run_nmcli_sudo(args):
-    result = subprocess.run(
-        ["sudo", "/usr/bin/nmcli"] + args,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        if not detail:
-            detail = f"nmcli failed with exit code {result.returncode}"
-        raise RuntimeError(detail)
-    return result
-
-
-def apply_wifi_client(wifi_cfg):
-    interface = wifi_cfg.get("interface", "wlan0")
-    connection_name = wifi_cfg.get("connection_name", "rtkbox-client")
-    ssid = wifi_cfg.get("ssid", "").strip()
-    password = wifi_cfg.get("password", "")
-
-    if not ssid:
-        raise ValueError("wifi.ssid is required")
-
-    subprocess.run(
-        ["sudo", "/usr/bin/nmcli", "connection", "delete", connection_name],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    connect_cmd = [
-        "device",
-        "wifi",
-        "connect",
-        ssid,
-        "ifname",
-        interface,
-        "name",
-        connection_name,
-    ]
-    if password:
-        connect_cmd.extend(["password", password])
-
-    run_nmcli_sudo(connect_cmd)
-    run_nmcli_sudo(["connection", "modify", connection_name, "connection.autoconnect", "yes"])
-    run_nmcli_sudo(["connection", "modify", connection_name, "connection.interface-name", interface])
-
-
-def apply_access_point(ap_cfg):
-    interface = ap_cfg.get("interface", "wlan0")
-    connection_name = ap_cfg.get("connection_name", "rtkbox-ap")
-    ssid = ap_cfg.get("ssid", "").strip()
-    password = ap_cfg.get("password", "")
-    address = ap_cfg.get("address", "10.42.0.1/24")
-
-    if not ssid:
-        raise ValueError("ap.ssid is required")
-    if len(password) < 8:
-        raise ValueError("ap.password must be at least 8 characters")
-
-    subprocess.run(
-        ["sudo", "/usr/bin/nmcli", "connection", "delete", connection_name],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    run_nmcli_sudo(
-        [
-            "connection",
-            "add",
-            "type",
-            "wifi",
-            "ifname",
-            interface,
-            "con-name",
-            connection_name,
-            "autoconnect",
-            "yes",
-            "ssid",
-            ssid,
-        ]
-    )
-    run_nmcli_sudo(
-        [
-            "connection",
-            "modify",
-            connection_name,
-            "802-11-wireless.mode",
-            "ap",
-            "802-11-wireless.band",
-            "bg",
-            "802-11-wireless-security.key-mgmt",
-            "wpa-psk",
-            "802-11-wireless-security.psk",
-            password,
-            "ipv4.method",
-            "shared",
-            "ipv4.addresses",
-            address,
-            "ipv6.method",
-            "disabled",
-            "connection.interface-name",
-            interface,
-        ]
-    )
-    run_nmcli_sudo(["connection", "up", connection_name])
-
-
-def get_wifi_status(interface):
-    try:
-        result = run_nmcli(
-            [
-                "-t",
-                "-f",
-                "GENERAL.STATE,GENERAL.CONNECTION,IP4.ADDRESS",
-                "device",
-                "show",
-                interface,
-            ]
-        )
-    except Exception:
-        return {"interface": interface, "state": "unknown", "connection": "", "address": ""}
-
-    state = ""
-    connection = ""
-    address = ""
-    for line in result.stdout.splitlines():
-        if line.startswith("GENERAL.STATE:"):
-            state = line.split(":", 1)[1]
-        elif line.startswith("GENERAL.CONNECTION:"):
-            connection = line.split(":", 1)[1]
-        elif line.startswith("IP4.ADDRESS[1]:"):
-            address = line.split(":", 1)[1]
-
-    return {
-        "interface": interface,
-        "state": state,
-        "connection": connection,
-        "address": address,
-    }
-
-
-def scan_wifi_networks(interface):
-    subprocess.run(
-        ["/usr/bin/nmcli", "device", "wifi", "rescan", "ifname", interface],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    result = run_nmcli(
-        [
-            "-m",
-            "multiline",
-            "-f",
-            "IN-USE,SSID,SIGNAL,SECURITY",
-            "device",
-            "wifi",
-            "list",
-            "ifname",
-            interface,
-        ]
-    )
-
-    networks = []
-    current = {}
-    for line in result.stdout.splitlines():
-        if not line.strip():
-            if current.get("ssid"):
-                networks.append(current)
-            current = {}
-            continue
-        key, value = line.split(":", 1)
-        current[key.strip().lower().replace("-", "_")] = value.strip()
-
-    if current.get("ssid"):
-        networks.append(current)
-
-    deduped = {}
-    for entry in networks:
-        ssid = entry.get("ssid", "").strip()
-        if not ssid:
-            continue
-        signal = int(entry.get("signal", "0") or 0)
-        item = {
-            "ssid": ssid,
-            "signal": signal,
-            "security": entry.get("security", ""),
-            "in_use": entry.get("in_use", "") == "*",
-        }
-        existing = deduped.get(ssid)
-        if existing is None or item["signal"] > existing["signal"]:
-            deduped[ssid] = item
-
-    return sorted(
-        deduped.values(),
-        key=lambda item: (not item["in_use"], -item["signal"], item["ssid"].lower()),
-    )
 
 
 def recordings_dir(cfg):

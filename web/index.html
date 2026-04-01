@@ -67,12 +67,6 @@
     </section>
 
     <section class="view" id="view-config">
-      <div class="network-toggle">
-        <button type="button" class="network-mode-button active" data-network-mode="ap">AP Mode</button>
-        <button type="button" class="network-mode-button" data-network-mode="wifi">Wi-Fi Mode</button>
-      </div>
-      <p class="hint">Switching this toggle now applies the selected network mode to the configured interface immediately.</p>
-
       <form id="configForm" class="config-grid">
         <section class="panel">
           <h2>Serial</h2>
@@ -88,7 +82,7 @@
         </section>
 
         <section class="panel">
-          <h2>Caster</h2>
+          <h2>Base NTRIP</h2>
           <label>Host<input name="caster.host" type="text"></label>
           <label>Port<input name="caster.port" type="number"></label>
           <label>Mountpoint<input name="caster.mountpoint" type="text"></label>
@@ -158,36 +152,10 @@
           </label>
         </section>
 
-        <section class="panel network-panel" id="apPanel">
-          <h2>Access Point</h2>
-          <label>Interface<input name="ap.interface" type="text"></label>
-          <label>Connection Name<input name="ap.connection_name" type="text"></label>
-          <label>SSID<input name="ap.ssid" type="text"></label>
-          <label>Password<input name="ap.password" type="text"></label>
-          <label>Address<input name="ap.address" type="text"></label>
-          <p class="hint">Recommended future setup: `ap.interface = wlan0` and `wifi.interface = wlan1`.</p>
-        </section>
-
-        <section class="panel network-panel is-hidden" id="wifiPanel">
-          <h2>Wi-Fi Client</h2>
-          <label>Interface<input name="wifi.interface" type="text"></label>
-          <label>Connection Name<input name="wifi.connection_name" type="text"></label>
-          <label>
-            SSID
-            <div class="inline-row">
-              <select name="wifi.ssid" id="wifiSsidSelect"></select>
-              <button id="wifiScanButton" type="button" class="secondary">Refresh</button>
-            </div>
-          </label>
-          <label>Password<input name="wifi.password" type="text"></label>
-          <p class="hint">Applying Wi-Fi will make the Pi try to join this network. If the AP uses the same radio, this page may disconnect immediately.</p>
-        </section>
       </form>
 
       <div class="footer-actions">
         <button id="saveConfigButton" type="button">Save Config</button>
-        <button id="applyApButton" type="button" class="secondary">Save + Apply AP</button>
-        <button id="applyWifiButton" type="button" class="secondary is-hidden">Save + Connect Wi-Fi</button>
         <span id="saveMessage" class="hint"></span>
       </div>
     </section>

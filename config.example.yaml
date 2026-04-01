@@ -44,16 +44,3 @@ app:
   remember_last_mode: true
   startup_mode: last
   last_mode: ""
-
-ap:
-  interface: wlan0
-  connection_name: rtkbox-ap
-  ssid: RTKbox
-  password: CHANGE_ME
-  address: 10.42.0.1/24
-
-wifi:
-  interface: wlan0
-  connection_name: rtkbox-client
-  ssid: YOUR_WIFI_SSID
-  password: YOUR_WIFI_PASSWORD

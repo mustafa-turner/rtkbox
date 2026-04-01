@@ -2,16 +2,11 @@ const modeSelect = document.getElementById("modeSelect");
 const startButton = document.getElementById("startButton");
 const stopButton = document.getElementById("stopButton");
 const saveConfigButton = document.getElementById("saveConfigButton");
-const applyApButton = document.getElementById("applyApButton");
-const applyWifiButton = document.getElementById("applyWifiButton");
-const wifiScanButton = document.getElementById("wifiScanButton");
-const wifiSsidSelect = document.getElementById("wifiSsidSelect");
 const statusLine = document.getElementById("statusLine");
 const logBox = document.getElementById("logBox");
 const saveMessage = document.getElementById("saveMessage");
 const configForm = document.getElementById("configForm");
 const menuButtons = document.querySelectorAll(".menu-button");
-const networkModeButtons = document.querySelectorAll(".network-mode-button");
 const views = document.querySelectorAll(".view");
 const latValue = document.getElementById("latValue");
 const lonValue = document.getElementById("lonValue");
@@ -19,19 +14,17 @@ const coordSource = document.getElementById("coordSource");
 const mapHint = document.getElementById("mapHint");
 const positionPanel = document.getElementById("positionPanel");
 const controlGrid = document.querySelector(".control-grid");
-const apPanel = document.getElementById("apPanel");
-const wifiPanel = document.getElementById("wifiPanel");
 const recordPanel = document.getElementById("recordPanel");
 const recordFileName = document.getElementById("recordFileName");
 const recordElapsed = document.getElementById("recordElapsed");
 const recordSize = document.getElementById("recordSize");
 const recordingsList = document.getElementById("recordingsList");
+const recordingsSection = document.querySelector(".downloads");
 
 const MODES = ["base-local", "base-ntrip", "rover-local", "rover-ntrip", "receiver-bridge", "record", "nmea"];
 const MAX_RENDERED_LOGS = 120;
 let map;
 let marker;
-let currentNetworkMode = "ap";
 
 function setField(name, value) {
   const field = configForm.elements.namedItem(name);
@@ -100,27 +93,12 @@ function readConfigFromForm() {
       startup_mode: getValue("app.startup_mode"),
       remember_last_mode: getValue("app.remember_last_mode"),
     },
-    ap: {
-      interface: getValue("ap.interface"),
-      connection_name: getValue("ap.connection_name"),
-      ssid: getValue("ap.ssid"),
-      password: getValue("ap.password"),
-      address: getValue("ap.address"),
-    },
-    wifi: {
-      interface: getValue("wifi.interface"),
-      connection_name: getValue("wifi.connection_name"),
-      ssid: getValue("wifi.ssid"),
-      password: getValue("wifi.password"),
-    },
   };
 }
 
 function applyConfig(config) {
-  const wifi = config.wifi || {};
   const receiverBridge = config.receiver_bridge || {};
   const record = config.record || {};
-  const ap = config.ap || {};
   setField("serial.port", config.serial.port);
   setField("serial.baud", config.serial.baud);
   setField("base_local.bind_host", config.base_local.bind_host);
@@ -151,15 +129,6 @@ function applyConfig(config) {
   setField("app.portal_port", config.app.portal_port);
   setField("app.startup_mode", config.app.startup_mode || "last");
   setField("app.remember_last_mode", config.app.remember_last_mode !== false);
-  setField("ap.interface", ap.interface || "wlan0");
-  setField("ap.connection_name", ap.connection_name || "rtkbox-ap");
-  setField("ap.ssid", ap.ssid || "RTKbox");
-  setField("ap.password", ap.password || "");
-  setField("ap.address", ap.address || "10.42.0.1/24");
-  setField("wifi.interface", wifi.interface || "wlan0");
-  setField("wifi.connection_name", wifi.connection_name || "rtkbox-client");
-  setField("wifi.password", wifi.password || "");
-  populateWifiNetworks([], wifi.ssid || "");
 }
 
 async function apiGet(path) {
@@ -205,12 +174,8 @@ async function apiPost(path, data) {
 function renderStatus(status) {
   const modeText = status.current_mode ? ` ${status.current_mode}` : "";
   const stateText = status.running ? "running" : "idle";
-  const wifi = status.wifi_status || {};
-  const ap = status.ap_status || {};
-  const apText = ap.connection ? ` | ap: ${ap.connection} ${ap.address || ""}` : "";
-  const wifiText = wifi.connection ? ` | wifi: ${wifi.connection} ${wifi.address || ""}` : "";
   const errorText = status.last_error ? ` | last error: ${status.last_error}` : "";
-  statusLine.textContent = `Status: ${stateText}${modeText}${apText}${wifiText}${errorText}`;
+  statusLine.textContent = `Status: ${stateText}${modeText}${errorText}`;
   if (status.current_mode) {
     modeSelect.value = status.current_mode;
   }
@@ -225,12 +190,18 @@ function renderStatus(status) {
 
   renderLatestPosition(rows);
   renderRecordingStatus(status.recording);
+  updateRecordingsVisibility();
 }
 
 function updatePositionPanelVisibility() {
   const show = modeSelect.value === "nmea";
   positionPanel.classList.toggle("is-hidden", !show);
   controlGrid.classList.toggle("map-hidden", !show);
+}
+
+function updateRecordingsVisibility() {
+  const show = modeSelect.value === "record";
+  recordingsSection.classList.toggle("is-hidden", !show);
 }
 
 function renderRecordingStatus(recording) {
@@ -249,44 +220,6 @@ function renderRecordingStatus(recording) {
   recordSize.textContent = formatBytes(recording.bytes_written || 0);
 }
 
-function updateNetworkModeVisibility() {
-  const showAp = currentNetworkMode === "ap";
-  apPanel.classList.toggle("is-hidden", !showAp);
-  wifiPanel.classList.toggle("is-hidden", showAp);
-  applyApButton.classList.toggle("is-hidden", !showAp);
-  applyWifiButton.classList.toggle("is-hidden", showAp);
-  networkModeButtons.forEach((button) => {
-    button.classList.toggle("active", button.dataset.networkMode === currentNetworkMode);
-  });
-}
-
-function setNetworkMode(mode) {
-  currentNetworkMode = mode === "wifi" ? "wifi" : "ap";
-  updateNetworkModeVisibility();
-}
-
-async function switchNetworkMode(mode) {
-  setNetworkMode(mode);
-
-  const payload = readConfigFromForm();
-  payload.network_mode = currentNetworkMode;
-  const label = currentNetworkMode === "ap" ? "AP" : "Wi-Fi";
-
-  setSaveMessage(`${label} switch requested. The portal may disconnect while wlan0 changes mode.`);
-
-  try {
-    await apiPost("/api/network/mode", payload);
-    setSaveMessage(`${label} mode applied.`);
-    await refreshStatus();
-  } catch (error) {
-    if (error.message.includes("Failed to fetch")) {
-      setSaveMessage(`${label} switch was sent. Reconnect to the Pi on the new network and refresh the page.`);
-      return;
-    }
-    setSaveMessage(error.message, true);
-  }
-}
-
 function setSaveMessage(text, isError = false) {
   saveMessage.textContent = text;
   saveMessage.style.color = isError ? "#a32914" : "";
@@ -295,7 +228,6 @@ function setSaveMessage(text, isError = false) {
 async function loadConfig() {
   const config = await apiGet("/api/config");
   applyConfig(config);
-  await refreshWifiNetworks(config.wifi?.ssid || "");
 }
 
 async function refreshStatus() {
@@ -353,60 +285,6 @@ async function stopMode() {
   }
 }
 
-async function applyWifi() {
-  try {
-    await apiPost("/api/wifi/apply", readConfigFromForm());
-    setSaveMessage("Wi-Fi apply requested. The portal may disconnect while the Pi joins the new network.");
-    await refreshStatus();
-  } catch (error) {
-    setSaveMessage(error.message, true);
-  }
-}
-
-async function applyAccessPoint() {
-  try {
-    await apiPost("/api/ap/apply", readConfigFromForm());
-    setSaveMessage("Access point apply requested. The portal may disconnect while the hotspot is reconfigured.");
-    await refreshStatus();
-  } catch (error) {
-    setSaveMessage(error.message, true);
-  }
-}
-
-function populateWifiNetworks(networks, selectedSsid) {
-  wifiSsidSelect.innerHTML = "";
-
-  if (!networks.length && !selectedSsid) {
-    const option = document.createElement("option");
-    option.value = "";
-    option.textContent = "No Wi-Fi networks found";
-    wifiSsidSelect.appendChild(option);
-    return;
-  }
-
-  let hasSelected = false;
-  networks.forEach((network) => {
-    const option = document.createElement("option");
-    option.value = network.ssid;
-    const security = network.security ? network.security : "open";
-    const active = network.in_use ? " | connected" : "";
-    option.textContent = `${network.ssid} | ${network.signal}% | ${security}${active}`;
-    if (network.ssid === selectedSsid) {
-      option.selected = true;
-      hasSelected = true;
-    }
-    wifiSsidSelect.appendChild(option);
-  });
-
-  if (selectedSsid && !hasSelected) {
-    const option = document.createElement("option");
-    option.value = selectedSsid;
-    option.selected = true;
-    option.textContent = `${selectedSsid} | saved`;
-    wifiSsidSelect.appendChild(option);
-  }
-}
-
 function formatDuration(totalSeconds) {
   const seconds = Math.max(0, Number(totalSeconds) || 0);
   const hours = String(Math.floor(seconds / 3600)).padStart(2, "0");
@@ -460,15 +338,6 @@ function renderRecordings(files) {
     item.appendChild(link);
     recordingsList.appendChild(item);
   });
-}
-
-async function refreshWifiNetworks(selectedSsid = wifiSsidSelect.value) {
-  try {
-    const payload = await apiGet("/api/wifi/scan");
-    populateWifiNetworks(payload.networks || [], selectedSsid);
-  } catch (error) {
-    setSaveMessage(error.message, true);
-  }
 }
 
 function initMap() {
@@ -575,10 +444,6 @@ menuButtons.forEach((button) => {
   button.addEventListener("click", () => switchView(button.dataset.view));
 });
 
-networkModeButtons.forEach((button) => {
-  button.addEventListener("click", () => switchNetworkMode(button.dataset.networkMode));
-});
-
 MODES.forEach((mode) => {
   const option = document.createElement("option");
   option.value = mode;
@@ -588,14 +453,12 @@ MODES.forEach((mode) => {
 
 initMap();
 updatePositionPanelVisibility();
-updateNetworkModeVisibility();
+updateRecordingsVisibility();
 saveConfigButton.addEventListener("click", saveConfig);
-applyApButton.addEventListener("click", applyAccessPoint);
-applyWifiButton.addEventListener("click", applyWifi);
-wifiScanButton.addEventListener("click", () => refreshWifiNetworks());
 startButton.addEventListener("click", startMode);
 stopButton.addEventListener("click", stopMode);
 modeSelect.addEventListener("change", updatePositionPanelVisibility);
+modeSelect.addEventListener("change", updateRecordingsVisibility);
 
 loadConfig()
   .then(async () => {

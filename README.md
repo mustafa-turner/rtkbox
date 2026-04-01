@@ -20,7 +20,6 @@ sudo apt install -y python3 python3-venv python3-pip
 `rtkbox` uses `str2str`, which is included in the `rtklib` package.
 
 ```bash
-sudo apt update
 sudo apt install -y rtklib
 ```
 
@@ -94,8 +93,8 @@ could not open port /dev/ttyAMA0
 Set the correct serial path in `config.yaml` for the mode you use, for example:
 
 ```yaml
-base_local:
-  serial_port: /dev/ttyACM0
+serial:
+  port: /dev/ttyACM0
 ```
 
 ### 6. Start a mode
@@ -127,19 +126,9 @@ zedf9p/
     ...
 ```
 
-## First setup
+## Config notes
 
-Create your local config from the example file:
-
-```bash
-cp config.example.yaml config.yaml
-```
-
-Then edit `config.yaml` with your local values.
-
-Git notes:
-
-- `config.yaml` is ignored by git because it may contain local Wi-Fi and caster credentials
+- `config.yaml` is ignored by git because it may contain local credentials
 - `config.example.yaml` is the safe template to commit and share
 
 ## Modes
@@ -166,7 +155,7 @@ python -m rtkbox --config config.yaml base-local
 ## Mode behavior
 
 - `base-local`: serial receiver -> LAN TCP server (`tcpsvr://`)
-- `base-ntrip`: serial receiver -> NTRIP caster (`ntrips://`)
+- `base-ntrip`: serial receiver -> Base NTRIP output (`ntrips://`)
 - `rover-local`: LAN TCP client (`tcpcli://`) -> receiver serial
 - `rover-ntrip`: NTRIP client (`ntrip://` or `ntripc://`) -> receiver serial
 - `receiver-bridge`: bidirectional TCP bridge for remote `u-center` access to the receiver
@@ -412,13 +401,13 @@ After that, the receiver can operate as a true fixed base and your normal `base-
 
 ## Portal mode
 
-Run:
+If you did not already start it in Quick start, run:
 
 ```bash
 python -m rtkbox portal
 ```
 
-Then open from a device connected to the Pi AP:
+Then open from a device on the same network as the Pi:
 
 ```text
 http://<pi-ip>:8080
@@ -433,42 +422,17 @@ The portal lets you:
 - monitor active PPP recording time and current file size in `record` mode
 - download finished `.ubx` recordings from the browser
 
-This project provides the control page only. True captive portal redirect still depends on your Pi access-point setup such as `hostapd`, `dnsmasq`, and HTTP/DNS redirect rules.
+This project provides the control page only. Network setup is managed separately on the Pi.
 
-## Product-style boot setup
+## Portal boot setup
 
-This is the simplest way to make the box behave more like a product:
+If you want the portal to start automatically on boot:
 
-- the Pi starts its own hotspot on boot
 - the portal runs automatically on boot
 - the portal remembers the last selected RTK mode
 - on the next boot, the portal can autostart that mode
-- AP and client Wi-Fi are configured separately
 
-### Step 1. Create the Pi hotspot once
-
-This project includes a helper script. It reads the `ap` section from `config.yaml` by default:
-
-```bash
-sudo bash scripts/setup_hotspot.sh
-```
-
-What it does:
-
-- creates a NetworkManager hotspot connection named `rtkbox-ap`
-- uses `ap.interface`
-- sets the Pi hotspot IP to `10.42.0.1`
-- enables hotspot autoconnect on boot
-
-After this, you should be able to connect to the Pi Wi-Fi SSID from `ap.ssid`.
-
-You can still override values manually:
-
-```bash
-sudo bash scripts/setup_hotspot.sh RTKbox yourpassword wlan0 rtkbox-ap 10.42.0.1/24
-```
-
-### Step 2. Install the portal as a boot service
+### Step 1. Install the portal as a boot service
 
 Copy the service file into `systemd`:
 
@@ -500,7 +464,7 @@ Follow live logs:
 journalctl -u rtkbox-portal.service -f
 ```
 
-### Step 3. Configure portal autostart behavior
+### Step 2. Configure portal autostart behavior
 
 In `config.yaml`:
 
@@ -517,7 +481,7 @@ Meaning:
 - `remember_last_mode: true` updates `app.last_mode` whenever you start a mode
 - `last_mode` is managed automatically by the app
 
-### Step 4. Reboot test
+### Step 3. Reboot test
 
 ```bash
 sudo reboot
@@ -525,12 +489,11 @@ sudo reboot
 
 After reboot:
 
-1. connect a phone or laptop to the Pi hotspot
-2. open `http://10.42.0.1:8080`
-3. confirm the portal loads
-4. confirm the last selected mode starts automatically if `startup_mode` is enabled
+1. open `http://<pi-ip>:8080`
+2. confirm the portal loads
+3. confirm the last selected mode starts automatically if `startup_mode` is enabled
 
-### Step 5. Useful service commands
+### Step 4. Useful service commands
 
 Restart the portal:
 
@@ -550,92 +513,6 @@ Disable boot autostart:
 sudo systemctl disable rtkbox-portal.service
 ```
 
-## Wi-Fi setup
-
-The web UI can save Wi-Fi client settings and tell the Pi to join that network with `nmcli`.
-
-Recommended interface layout:
-
-- `ap.interface = wlan0`
-- `wifi.interface = wlan1` when you add a second USB Wi-Fi adapter
-
-Current single-radio fallback:
-
-- `ap.interface = wlan0`
-- `wifi.interface = wlan0`
-- expect AP/client switching, not simultaneous use
-
-To let the portal change networking, allow only `nmcli` through `sudo`.
-
-Step 1. Create a sudoers rule
-
-```bash
-sudo visudo -f /etc/sudoers.d/rtkbox
-```
-
-Add this line:
-
-```text
-pi ALL=(root) NOPASSWD: /usr/bin/nmcli
-```
-
-Step 2. Fix the file permissions
-
-```bash
-sudo chmod 440 /etc/sudoers.d/rtkbox
-```
-
-Step 3. Validate the sudoers file
-
-```bash
-sudo visudo -c -f /etc/sudoers.d/rtkbox
-```
-
-Step 4. Test that `nmcli` works without a password prompt
-
-```bash
-sudo /usr/bin/nmcli device wifi list ifname wlan0
-```
-
-Step 5. Start the portal
-
-```bash
-python -m rtkbox portal
-```
-
-Step 6. Open the portal from a device connected to the Pi
-
-```text
-http://<pi-ip>:8080
-```
-
-Step 7. In the `Config` screen:
-
-- set `wifi.interface` to the client interface you want to use
-- choose an SSID from the dropdown
-- enter the Wi-Fi password
-- click `Save + Connect Wi-Fi`
-
-Optional AP setup from the portal:
-
-- edit the `Access Point` section
-- click `Save + Apply AP`
-- if you are reconfiguring the active AP, the portal may disconnect while the hotspot restarts
-
-Important AP mode note:
-
-- on a single-radio setup, enabling AP mode on `wlan0` disables normal Wi-Fi client use on that same interface
-- if you enable AP mode, the Pi may stop using Wi-Fi for internet or LAN access
-- if you want to keep configuring the Pi while enabling AP mode, the safest approach is to stay connected to the same Pi over Ethernet
-- the cleaner long-term setup is `wlan0` for AP and `wlan1` for Wi-Fi client
-
-Notes:
-
-- The SSID dropdown comes from Wi-Fi networks currently visible to the Pi.
-- If `wlan0` is being used for the AP and client at the same time, the portal may disconnect as soon as the Pi joins the target network.
-- Scanning Wi-Fi and showing status use normal `nmcli`; only the actual connect action needs the `sudo` rule above.
-- Access point apply also needs the same `sudo /usr/bin/nmcli` permission.
-
 ## Config reference
 
 `serial`
@@ -647,12 +524,12 @@ Notes:
 - `port`: TCP port exposed on LAN.
 - `format`: Optional RTKLIB stream format suffix (usually leave empty).
 
-`caster` (used by `base-ntrip`)
-- `host`: NTRIP caster hostname.
-- `port`: NTRIP caster port (usually `2101`).
+`caster` (Base NTRIP settings, used by `base-ntrip`)
+- `host`: Base NTRIP host.
+- `port`: Base NTRIP port (usually `2101`).
 - `mountpoint`: Mountpoint name to publish to.
 - `user`: Optional username (empty if not required).
-- `password`: Caster password.
+- `password`: Base NTRIP password.
 
 `rover_local` (used by `rover-local`)
 - `host`: IP/hostname of LAN correction source (TCP server).
@@ -660,11 +537,11 @@ Notes:
 
 `rover_ntrip` (used by `rover-ntrip`)
 - `scheme`: `ntrip` or `ntripc` (RTKLIB client scheme).
-- `host`: NTRIP caster hostname.
-- `port`: NTRIP caster port.
+- `host`: NTRIP host.
+- `port`: NTRIP port.
 - `mountpoint`: Mountpoint to subscribe to.
 - `user`: Optional username.
-- `password`: Password for mountpoint/caster.
+- `password`: Password for mountpoint/NTRIP host.
 
 `receiver_bridge` (used by `receiver-bridge`)
 - `serial_port`: Receiver port used only for remote `u-center` access. Recommended: `/dev/ttyACM0`.
@@ -679,16 +556,3 @@ Notes:
 - `startup_mode`: Mode to start automatically when the portal boots. Use `last` to resume the previous mode, or leave empty to disable autostart.
 - `remember_last_mode`: If `true`, starting a mode updates `app.last_mode`.
 - `last_mode`: Last started RTK mode. This is managed by the app.
-
-`ap`
-- `interface`: Wireless device used for the management hotspot. Recommended: `wlan0`.
-- `connection_name`: Saved NetworkManager hotspot profile name.
-- `ssid`: Hotspot SSID devices connect to.
-- `password`: Hotspot password. Must be at least 8 characters.
-- `address`: Hotspot IP/subnet, for example `10.42.0.1/24`.
-
-`wifi`
-- `interface`: Wireless device used for client connection. Use `wlan1` if you add a second Wi-Fi adapter, otherwise `wlan0`.
-- `connection_name`: Saved NetworkManager connection name, for example `rtkbox-client`.
-- `ssid`: Target Wi-Fi network name.
-- `password`: Target Wi-Fi password.
