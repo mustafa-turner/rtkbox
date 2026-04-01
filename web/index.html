@@ -152,6 +152,28 @@
           </label>
         </section>
 
+        <section class="panel">
+          <h2>Receiver TMODE3</h2>
+          <p class="hint">Set survey/fixed mode, edit fixed ECEF coordinates, read status, and save to flash.</p>
+          <button id="readTmodeButton" type="button" class="secondary field-action">Read Status</button>
+          <label>Mode
+            <select id="tmodeModeSelect">
+              <option value="survey">survey</option>
+              <option value="fixed">fixed</option>
+            </select>
+          </label>
+          <label>Survey Min Duration (s)<input id="tmodeSurveyMinDur" type="number" value="600" min="1"></label>
+          <label>Survey Accuracy Limit (0.1mm)<input id="tmodeSurveyAccLimit" type="number" value="5000" min="1"></label>
+          <label>Fixed ECEF X (m)<input id="tmodeFixedEcefX" type="number" step="0.0001"></label>
+          <label>Fixed ECEF Y (m)<input id="tmodeFixedEcefY" type="number" step="0.0001"></label>
+          <label>Fixed ECEF Z (m)<input id="tmodeFixedEcefZ" type="number" step="0.0001"></label>
+          <div class="inline-row">
+            <button id="applyTmodeButton" type="button" class="secondary">Apply TMODE3</button>
+            <button id="saveReceiverButton" type="button" class="success">Save to BBR/Flash</button>
+          </div>
+          <p class="hint">Apply changes receiver settings now (temporary). Save to BBR/Flash makes the current receiver settings persistent after reboot/power cycle.</p>
+        </section>
+
       </form>
 
       <div class="footer-actions">

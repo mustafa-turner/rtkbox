@@ -3,6 +3,7 @@
 from datetime import datetime
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import threading
 import time
@@ -137,6 +138,105 @@ def build_recording_path(cfg):
     return output_dir / filename
 
 
+def ubx_checksum(data):
+    ck_a = 0
+    ck_b = 0
+    for byte in data:
+        ck_a = (ck_a + byte) & 0xFF
+        ck_b = (ck_b + ck_a) & 0xFF
+    return bytes([ck_a, ck_b])
+
+
+def ubx_frame(msg_class, msg_id, payload=b""):
+    header = bytes([msg_class, msg_id]) + struct.pack("<H", len(payload))
+    return b"\xB5\x62" + header + payload + ubx_checksum(header + payload)
+
+
+def read_ubx_message(ser, timeout_s=1.5):
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        start = ser.read(1)
+        if start != b"\xB5":
+            continue
+        if ser.read(1) != b"\x62":
+            continue
+        header = ser.read(4)
+        if len(header) != 4:
+            continue
+        msg_class, msg_id, payload_len = header[0], header[1], struct.unpack("<H", header[2:4])[0]
+        payload = ser.read(payload_len)
+        checksum = ser.read(2)
+        if len(payload) != payload_len or len(checksum) != 2:
+            continue
+        if ubx_checksum(header + payload) != checksum:
+            continue
+        return msg_class, msg_id, payload
+    return None
+
+
+def send_ubx_and_wait_ack(ser, msg_class, msg_id, payload=b"", timeout_s=1.5):
+    ser.reset_input_buffer()
+    ser.write(ubx_frame(msg_class, msg_id, payload))
+    ser.flush()
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        message = read_ubx_message(ser, timeout_s=max(0.1, deadline - time.time()))
+        if message is None:
+            break
+        cls, mid, pl = message
+        if cls == 0x05 and mid == 0x01 and len(pl) >= 2 and pl[0] == msg_class and pl[1] == msg_id:
+            return
+        if cls == 0x05 and mid == 0x00 and len(pl) >= 2 and pl[0] == msg_class and pl[1] == msg_id:
+            raise RuntimeError(f"Receiver NAK for UBX-{msg_class:02X}-{msg_id:02X}")
+    raise RuntimeError(f"No ACK for UBX-{msg_class:02X}-{msg_id:02X}")
+
+
+def poll_cfg_msg_rates(ser, target_class, target_id):
+    ser.reset_input_buffer()
+    ser.write(ubx_frame(0x06, 0x01, bytes([target_class, target_id])))
+    ser.flush()
+    deadline = time.time() + 1.5
+    while time.time() < deadline:
+        message = read_ubx_message(ser, timeout_s=max(0.1, deadline - time.time()))
+        if message is None:
+            break
+        msg_class, msg_id, payload = message
+        if msg_class == 0x06 and msg_id == 0x01 and len(payload) >= 8 and payload[0] == target_class and payload[1] == target_id:
+            return list(payload[2:8])
+    raise RuntimeError(f"No UBX-CFG-MSG poll response for {target_class:02X}-{target_id:02X}")
+
+
+def set_cfg_msg_rates(ser, target_class, target_id, rates):
+    payload = bytes([target_class, target_id] + [int(v) & 0xFF for v in rates[:6]])
+    send_ubx_and_wait_ack(ser, 0x06, 0x01, payload)
+
+
+def ensure_ppp_messages_enabled(ser, runner):
+    targets = [
+        (0x02, 0x15, "UBX-RXM-RAWX"),
+        (0x02, 0x13, "UBX-RXM-SFRBX"),
+    ]
+
+    for msg_class, msg_id, label in targets:
+        rates = [0, 0, 0, 0, 0, 0]
+        try:
+            rates = poll_cfg_msg_rates(ser, msg_class, msg_id)
+        except Exception as exc:
+            runner.log(f"Could not poll {label} rates ({exc}). Applying USB rate=1.")
+
+        if len(rates) < 6:
+            rates = (rates + [0, 0, 0, 0, 0, 0])[:6]
+
+        usb_rate_before = rates[3]
+        if usb_rate_before == 1:
+            runner.log(f"{label} already enabled on USB.")
+            continue
+
+        rates[3] = 1
+        set_cfg_msg_rates(ser, msg_class, msg_id, rates)
+        runner.log(f"Enabled {label} on USB (rate {usb_rate_before} -> 1).")
+
+
 def run_record_loop(cfg, reconnect_delay, runner):
     record_cfg = get_required(cfg, "record")
     port = normalize_serial_port(record_cfg.get("serial_port", get_required(cfg, "receiver_bridge.serial_port")))
@@ -155,6 +255,7 @@ def run_record_loop(cfg, reconnect_delay, runner):
         )
         try:
             with serial.Serial(port=port, baudrate=baud, timeout=1) as ser, output_path.open("wb") as fh:
+                ensure_ppp_messages_enabled(ser, runner)
                 runner.log(f"Recording raw UBX from {port} @ {baud} to {output_path}")
                 while not runner.stop_event.is_set():
                     chunk = ser.read(4096)

@@ -20,6 +20,15 @@ const recordElapsed = document.getElementById("recordElapsed");
 const recordSize = document.getElementById("recordSize");
 const recordingsList = document.getElementById("recordingsList");
 const recordingsSection = document.querySelector(".downloads");
+const tmodeModeSelect = document.getElementById("tmodeModeSelect");
+const applyTmodeButton = document.getElementById("applyTmodeButton");
+const readTmodeButton = document.getElementById("readTmodeButton");
+const saveReceiverButton = document.getElementById("saveReceiverButton");
+const tmodeSurveyMinDur = document.getElementById("tmodeSurveyMinDur");
+const tmodeSurveyAccLimit = document.getElementById("tmodeSurveyAccLimit");
+const tmodeFixedEcefX = document.getElementById("tmodeFixedEcefX");
+const tmodeFixedEcefY = document.getElementById("tmodeFixedEcefY");
+const tmodeFixedEcefZ = document.getElementById("tmodeFixedEcefZ");
 
 const MODES = ["base-local", "base-ntrip", "rover-local", "rover-ntrip", "receiver-bridge", "record", "nmea"];
 const MAX_RENDERED_LOGS = 120;
@@ -285,6 +294,86 @@ async function stopMode() {
   }
 }
 
+function renderTmodeStatus(status) {
+  if (status.mode === "fixed" || status.mode === "survey") {
+    tmodeModeSelect.value = status.mode;
+  }
+  tmodeSurveyMinDur.value = status.survey_min_dur_s ?? tmodeSurveyMinDur.value;
+  tmodeSurveyAccLimit.value = status.survey_acc_limit_0_1mm ?? tmodeSurveyAccLimit.value;
+  if (typeof status.ecef_x_m === "number") {
+    tmodeFixedEcefX.value = Number(status.ecef_x_m).toFixed(4);
+  }
+  if (typeof status.ecef_y_m === "number") {
+    tmodeFixedEcefY.value = Number(status.ecef_y_m).toFixed(4);
+  }
+  if (typeof status.ecef_z_m === "number") {
+    tmodeFixedEcefZ.value = Number(status.ecef_z_m).toFixed(4);
+  }
+
+  const lines = [
+    `Serial: ${status.serial_port || "-"} @ ${status.baud || "-"}`,
+    `Mode: ${status.mode || "-"}`,
+    `Version: ${status.version ?? "-"}`,
+    `LLA flag: ${status.lla ? "on" : "off"}`,
+    `ECEF X: ${Number(status.ecef_x_m || 0).toFixed(4)} m`,
+    `ECEF Y: ${Number(status.ecef_y_m || 0).toFixed(4)} m`,
+    `ECEF Z: ${Number(status.ecef_z_m || 0).toFixed(4)} m`,
+    `Fixed Pos Acc: ${status.fixed_pos_acc_0_1mm ?? "-"} (0.1mm)`,
+    `Survey Min Dur: ${status.survey_min_dur_s ?? "-"} s`,
+    `Survey Acc Limit: ${status.survey_acc_limit_0_1mm ?? "-"} (0.1mm)`,
+  ];
+  setSaveMessage(`TMODE3: ${lines.join(" | ")}`);
+}
+
+async function readTmodeStatus() {
+  try {
+    const status = await apiGet("/api/receiver/tmode3");
+    renderTmodeStatus(status);
+    setSaveMessage("Receiver TMODE3 status loaded.");
+  } catch (error) {
+    setSaveMessage(error.message, true);
+  }
+}
+
+async function setTmode(mode) {
+  try {
+    const payload = {
+      mode,
+      survey_min_dur: Number(tmodeSurveyMinDur.value || 600),
+      survey_acc_limit: Number(tmodeSurveyAccLimit.value || 5000),
+    };
+    if (mode === "fixed") {
+      const x = Number(tmodeFixedEcefX.value);
+      const y = Number(tmodeFixedEcefY.value);
+      const z = Number(tmodeFixedEcefZ.value);
+      if (Number.isNaN(x) || Number.isNaN(y) || Number.isNaN(z)) {
+        throw new Error("Enter valid fixed ECEF X/Y/Z values.");
+      }
+      payload.fixed_ecef_x_m = x;
+      payload.fixed_ecef_y_m = y;
+      payload.fixed_ecef_z_m = z;
+    }
+    const result = await apiPost("/api/receiver/tmode3/apply", payload);
+    if (result && result.status) {
+      renderTmodeStatus(result.status);
+    } else {
+      await readTmodeStatus();
+    }
+    setSaveMessage(`TMODE3 updated to ${mode}.`);
+  } catch (error) {
+    setSaveMessage(error.message, true);
+  }
+}
+
+async function saveReceiverConfig() {
+  try {
+    await apiPost("/api/receiver/save", {});
+    setSaveMessage("Receiver config saved to BBR/Flash.");
+  } catch (error) {
+    setSaveMessage(error.message, true);
+  }
+}
+
 function formatDuration(totalSeconds) {
   const seconds = Math.max(0, Number(totalSeconds) || 0);
   const hours = String(Math.floor(seconds / 3600)).padStart(2, "0");
@@ -459,11 +548,15 @@ startButton.addEventListener("click", startMode);
 stopButton.addEventListener("click", stopMode);
 modeSelect.addEventListener("change", updatePositionPanelVisibility);
 modeSelect.addEventListener("change", updateRecordingsVisibility);
+readTmodeButton.addEventListener("click", readTmodeStatus);
+applyTmodeButton.addEventListener("click", () => setTmode(tmodeModeSelect.value));
+saveReceiverButton.addEventListener("click", saveReceiverConfig);
 
 loadConfig()
   .then(async () => {
     await refreshStatus();
     await refreshRecordings();
+    await readTmodeStatus();
   })
   .catch((error) => {
     statusLine.textContent = `Status: failed to load portal data | ${error.message}`;

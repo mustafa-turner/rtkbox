@@ -141,6 +141,16 @@ button.secondary,
   border-color: #c9bca8;
 }
 
+button.success {
+  background: #1f5c4c;
+  color: #fff;
+  border-color: #1f5c4c;
+}
+
+.field-action {
+  margin-bottom: 0.75rem;
+}
+
 .menu-button.active {
   background: #b44d2d;
   color: #fff;
