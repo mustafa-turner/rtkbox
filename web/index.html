@@ -51,7 +51,17 @@
         <div class="panel">
           <h2>Logs</h2>
           <p class="hint">Recent logs auto-refresh and stay capped to keep memory usage predictable.</p>
+          <div id="recordPanel" class="record-panel is-hidden">
+            <p><strong>Recording:</strong> <span id="recordFileName">-</span></p>
+            <p><strong>Elapsed:</strong> <span id="recordElapsed">00:00:00</span></p>
+            <p><strong>Size:</strong> <span id="recordSize">0 B</span></p>
+          </div>
           <pre id="logBox" class="log-box"></pre>
+          <div class="downloads">
+            <h3>Recordings</h3>
+            <p class="hint">Finished `.ubx` files saved on the Pi are listed here.</p>
+            <div id="recordingsList" class="recordings-list">No recordings yet.</div>
+          </div>
         </div>
       </div>
     </section>
@@ -117,6 +127,14 @@
         </section>
 
         <section class="panel">
+          <h2>Record</h2>
+          <label>Serial Port<input name="record.serial_port" type="text"></label>
+          <label>Baud<input name="record.baud" type="number"></label>
+          <label>Output Directory<input name="record.output_dir" type="text"></label>
+          <p class="hint">Use this mode to record raw UBX on the Pi for PPP. Start `record`, let it run, then stop it and download the `.ubx` file from the logs view.</p>
+        </section>
+
+        <section class="panel">
           <h2>App</h2>
           <label>Reconnect Delay<input name="app.reconnect_delay" type="number"></label>
           <label>Portal Host<input name="app.portal_host" type="text"></label>
@@ -130,6 +148,7 @@
               <option value="rover-local">rover-local</option>
               <option value="rover-ntrip">rover-ntrip</option>
               <option value="receiver-bridge">receiver-bridge</option>
+              <option value="record">record</option>
               <option value="nmea">nmea</option>
             </select>
           </label>

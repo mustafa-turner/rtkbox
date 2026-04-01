@@ -32,6 +32,11 @@ receiver_bridge:
   serial_port: /dev/ttyACM0
   baud: 115200
 
+record:
+  serial_port: /dev/ttyACM0
+  baud: 115200
+  output_dir: recordings
+
 app:
   reconnect_delay: 5
   portal_host: 0.0.0.0

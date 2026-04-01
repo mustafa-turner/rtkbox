@@ -21,8 +21,13 @@ const positionPanel = document.getElementById("positionPanel");
 const controlGrid = document.querySelector(".control-grid");
 const apPanel = document.getElementById("apPanel");
 const wifiPanel = document.getElementById("wifiPanel");
+const recordPanel = document.getElementById("recordPanel");
+const recordFileName = document.getElementById("recordFileName");
+const recordElapsed = document.getElementById("recordElapsed");
+const recordSize = document.getElementById("recordSize");
+const recordingsList = document.getElementById("recordingsList");
 
-const MODES = ["base-local", "base-ntrip", "rover-local", "rover-ntrip", "receiver-bridge", "nmea"];
+const MODES = ["base-local", "base-ntrip", "rover-local", "rover-ntrip", "receiver-bridge", "record", "nmea"];
 const MAX_RENDERED_LOGS = 120;
 let map;
 let marker;
@@ -83,6 +88,11 @@ function readConfigFromForm() {
       bind_host: getValue("receiver_bridge.bind_host"),
       port: Number(getValue("receiver_bridge.port")),
     },
+    record: {
+      serial_port: getValue("record.serial_port"),
+      baud: Number(getValue("record.baud")),
+      output_dir: getValue("record.output_dir"),
+    },
     app: {
       reconnect_delay: Number(getValue("app.reconnect_delay")),
       portal_host: getValue("app.portal_host"),
@@ -109,6 +119,7 @@ function readConfigFromForm() {
 function applyConfig(config) {
   const wifi = config.wifi || {};
   const receiverBridge = config.receiver_bridge || {};
+  const record = config.record || {};
   const ap = config.ap || {};
   setField("serial.port", config.serial.port);
   setField("serial.baud", config.serial.baud);
@@ -132,6 +143,9 @@ function applyConfig(config) {
   setField("receiver_bridge.baud", receiverBridge.baud || 115200);
   setField("receiver_bridge.bind_host", receiverBridge.bind_host || "");
   setField("receiver_bridge.port", receiverBridge.port || 5011);
+  setField("record.serial_port", record.serial_port || receiverBridge.serial_port || "/dev/ttyACM0");
+  setField("record.baud", record.baud || receiverBridge.baud || 115200);
+  setField("record.output_dir", record.output_dir || "recordings");
   setField("app.reconnect_delay", config.app.reconnect_delay);
   setField("app.portal_host", config.app.portal_host);
   setField("app.portal_port", config.app.portal_port);
@@ -210,12 +224,29 @@ function renderStatus(status) {
   }
 
   renderLatestPosition(rows);
+  renderRecordingStatus(status.recording);
 }
 
 function updatePositionPanelVisibility() {
   const show = modeSelect.value === "nmea";
   positionPanel.classList.toggle("is-hidden", !show);
   controlGrid.classList.toggle("map-hidden", !show);
+}
+
+function renderRecordingStatus(recording) {
+  const show = modeSelect.value === "record" || Boolean(recording);
+  recordPanel.classList.toggle("is-hidden", !show);
+
+  if (!recording) {
+    recordFileName.textContent = "-";
+    recordElapsed.textContent = "00:00:00";
+    recordSize.textContent = "0 B";
+    return;
+  }
+
+  recordFileName.textContent = recording.name || recording.path || "-";
+  recordElapsed.textContent = formatDuration(recording.elapsed_seconds || 0);
+  recordSize.textContent = formatBytes(recording.bytes_written || 0);
 }
 
 function updateNetworkModeVisibility() {
@@ -276,6 +307,15 @@ async function refreshStatus() {
   }
 }
 
+async function refreshRecordings() {
+  try {
+    const payload = await apiGet("/api/recordings");
+    renderRecordings(payload.files || []);
+  } catch (error) {
+    recordingsList.textContent = `Failed to load recordings: ${error.message}`;
+  }
+}
+
 async function saveConfig() {
   try {
     await apiPost("/api/config", readConfigFromForm());
@@ -296,6 +336,7 @@ async function startMode() {
     await apiPost("/api/start", { mode: modeSelect.value });
     setSaveMessage(`Started ${modeSelect.value}.`);
     await refreshStatus();
+    await refreshRecordings();
   } catch (error) {
     setSaveMessage(error.message, true);
   }
@@ -306,6 +347,7 @@ async function stopMode() {
     await apiPost("/api/stop", {});
     setSaveMessage("Stop requested.");
     await refreshStatus();
+    await refreshRecordings();
   } catch (error) {
     setSaveMessage(error.message, true);
   }
@@ -363,6 +405,61 @@ function populateWifiNetworks(networks, selectedSsid) {
     option.textContent = `${selectedSsid} | saved`;
     wifiSsidSelect.appendChild(option);
   }
+}
+
+function formatDuration(totalSeconds) {
+  const seconds = Math.max(0, Number(totalSeconds) || 0);
+  const hours = String(Math.floor(seconds / 3600)).padStart(2, "0");
+  const minutes = String(Math.floor((seconds % 3600) / 60)).padStart(2, "0");
+  const secs = String(seconds % 60).padStart(2, "0");
+  return `${hours}:${minutes}:${secs}`;
+}
+
+function formatBytes(size) {
+  const value = Number(size) || 0;
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)} KB`;
+  }
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderRecordings(files) {
+  recordingsList.innerHTML = "";
+
+  if (!files.length) {
+    recordingsList.textContent = "No recordings yet.";
+    return;
+  }
+
+  files.forEach((file) => {
+    const item = document.createElement("div");
+    item.className = "recording-item";
+
+    const meta = document.createElement("div");
+    meta.className = "recording-meta";
+
+    const name = document.createElement("div");
+    name.className = "recording-name";
+    name.textContent = file.name;
+
+    const detail = document.createElement("div");
+    detail.className = "recording-detail";
+    detail.textContent = `${formatBytes(file.size)} | ${new Date(file.modified * 1000).toLocaleString()}`;
+
+    const link = document.createElement("a");
+    link.className = "recording-link";
+    link.href = file.download_path;
+    link.textContent = "Download";
+
+    meta.appendChild(name);
+    meta.appendChild(detail);
+    item.appendChild(meta);
+    item.appendChild(link);
+    recordingsList.appendChild(item);
+  });
 }
 
 async function refreshWifiNetworks(selectedSsid = wifiSsidSelect.value) {
@@ -501,9 +598,13 @@ stopButton.addEventListener("click", stopMode);
 modeSelect.addEventListener("change", updatePositionPanelVisibility);
 
 loadConfig()
-  .then(refreshStatus)
+  .then(async () => {
+    await refreshStatus();
+    await refreshRecordings();
+  })
   .catch((error) => {
     statusLine.textContent = `Status: failed to load portal data | ${error.message}`;
   });
 
 window.setInterval(refreshStatus, 1000);
+window.setInterval(refreshRecordings, 5000);

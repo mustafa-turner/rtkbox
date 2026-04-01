@@ -1,5 +1,7 @@
 """Runtime helpers for rtkbox modes."""
 
+from datetime import datetime
+from pathlib import Path
 import shutil
 import subprocess
 import threading
@@ -15,6 +17,7 @@ class Runner:
         self.stop_event = threading.Event()
         self._lock = threading.Lock()
         self.process = None
+        self.runtime = {"recording": None}
 
     def log(self, message):
         print(message, flush=True)
@@ -33,6 +36,14 @@ class Runner:
         with self._lock:
             if self.process is not None and self.process.poll() is None:
                 self.process.terminate()
+
+    def set_recording(self, info):
+        with self._lock:
+            self.runtime["recording"] = info
+
+    def clear_recording(self):
+        with self._lock:
+            self.runtime["recording"] = None
 
 
 def sleep_or_stop(seconds, runner):
@@ -117,6 +128,58 @@ def run_nmea_loop(cfg, reconnect_delay, runner):
     runner.log("Stopped.")
 
 
+def build_recording_path(cfg):
+    record_cfg = get_required(cfg, "record")
+    output_dir = Path(str(record_cfg.get("output_dir", "recordings")))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"ppp-{timestamp}.ubx"
+    return output_dir / filename
+
+
+def run_record_loop(cfg, reconnect_delay, runner):
+    record_cfg = get_required(cfg, "record")
+    port = normalize_serial_port(record_cfg.get("serial_port", get_required(cfg, "receiver_bridge.serial_port")))
+    baud = int(record_cfg.get("baud", get_required(cfg, "receiver_bridge.baud")))
+
+    while not runner.stop_event.is_set():
+        output_path = build_recording_path(cfg)
+        start_time = time.time()
+        runner.set_recording(
+            {
+                "path": str(output_path),
+                "name": output_path.name,
+                "started_at": start_time,
+                "bytes_written": 0,
+            }
+        )
+        try:
+            with serial.Serial(port=port, baudrate=baud, timeout=1) as ser, output_path.open("wb") as fh:
+                runner.log(f"Recording raw UBX from {port} @ {baud} to {output_path}")
+                while not runner.stop_event.is_set():
+                    chunk = ser.read(4096)
+                    if not chunk:
+                        continue
+                    fh.write(chunk)
+                    fh.flush()
+                    with runner._lock:
+                        if runner.runtime["recording"] is not None:
+                            runner.runtime["recording"]["bytes_written"] += len(chunk)
+        except Exception as exc:
+            if runner.stop_event.is_set():
+                break
+            runner.log(f"Record error: {exc}. Reconnecting in {reconnect_delay}s...")
+            runner.clear_recording()
+            if not sleep_or_stop(reconnect_delay, runner):
+                break
+            continue
+
+        break
+
+    runner.clear_recording()
+    runner.log("Stopped.")
+
+
 def log_friendly_info(mode, cfg, runner):
     if mode == "base-local":
         port = get_required(cfg, "base_local.port")
@@ -124,6 +187,9 @@ def log_friendly_info(mode, cfg, runner):
     if mode == "receiver-bridge":
         port = get_required(cfg, "receiver_bridge.port")
         runner.log(f"u-center TCP target should be reachable at {detect_local_ip()}:{port}")
+    if mode == "record":
+        record_cfg = get_required(cfg, "record")
+        runner.log(f"PPP record mode will save raw UBX files under {record_cfg.get('output_dir', 'recordings')}")
 
 
 def run_mode(mode, cfg, runner=None):
@@ -133,6 +199,10 @@ def run_mode(mode, cfg, runner=None):
 
     if mode == "nmea":
         run_nmea_loop(cfg, reconnect_delay, runner)
+        return
+
+    if mode == "record":
+        run_record_loop(cfg, reconnect_delay, runner)
         return
 
     if shutil.which("str2str") is None:

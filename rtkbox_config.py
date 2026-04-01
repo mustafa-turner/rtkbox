@@ -5,7 +5,7 @@ import socket
 import yaml
 
 
-MODES = ["base-local", "base-ntrip", "rover-local", "rover-ntrip", "receiver-bridge", "nmea"]
+MODES = ["base-local", "base-ntrip", "rover-local", "rover-ntrip", "receiver-bridge", "record", "nmea"]
 
 
 def load_config(path):

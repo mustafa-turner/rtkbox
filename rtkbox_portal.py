@@ -1,6 +1,7 @@
 """Minimal local control server for rtkbox."""
 
 from collections import deque
+from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -39,12 +40,16 @@ class AppState(Runner):
             cfg = self.load_config()
             wifi_cfg = cfg.get("wifi", {})
             ap_cfg = cfg.get("ap", {})
+            recording = dict(self.runtime.get("recording") or {}) if self.runtime.get("recording") else None
+            if recording and recording.get("started_at"):
+                recording["elapsed_seconds"] = int(max(0, time.time() - recording["started_at"]))
             return {
                 "running": running,
                 "current_mode": self.current_mode,
                 "last_error": self.last_error,
                 "logs": list(self.logs),
                 "log_limit": LOG_LIMIT,
+                "recording": recording,
                 "wifi_status": get_wifi_status(wifi_cfg.get("interface", "wlan0")),
                 "ap_status": get_wifi_status(ap_cfg.get("interface", "wlan0")),
             }
@@ -125,6 +130,12 @@ class PortalHandler(BaseHTTPRequestHandler):
             interface = self.server.app_state.load_config().get("wifi", {}).get("interface", "wlan0")
             self._send_json({"networks": scan_wifi_networks(interface)})
             return
+        if self.path == "/api/recordings":
+            self._send_json({"files": list_recordings(self.server.app_state.load_config())})
+            return
+        if self.path.startswith("/downloads/"):
+            self._send_download(self.path.removeprefix("/downloads/"))
+            return
         self.send_error(404)
 
     def do_POST(self):
@@ -203,6 +214,20 @@ class PortalHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def _send_download(self, name):
+        path = resolve_recording_path(self.server.app_state.load_config(), name)
+        if path is None or not path.is_file():
+            self.send_error(404)
+            return
+        payload = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        self.send_header("Last-Modified", formatdate(path.stat().st_mtime, usegmt=True))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def log_message(self, fmt, *args):
         return
 
@@ -248,6 +273,11 @@ def validate_config_payload(data, existing=None):
             "port": int(data["receiver_bridge"]["port"]),
             "serial_port": str(data["receiver_bridge"].get("serial_port", "/dev/ttyACM0")),
             "baud": int(data["receiver_bridge"].get("baud", 115200)),
+        },
+        "record": {
+            "serial_port": str(data["record"].get("serial_port", data["receiver_bridge"].get("serial_port", "/dev/ttyACM0"))),
+            "baud": int(data["record"].get("baud", data["receiver_bridge"].get("baud", 115200))),
+            "output_dir": str(data["record"].get("output_dir", "recordings")),
         },
         "app": {
             "reconnect_delay": int(data["app"]["reconnect_delay"]),
@@ -486,6 +516,42 @@ def scan_wifi_networks(interface):
         deduped.values(),
         key=lambda item: (not item["in_use"], -item["signal"], item["ssid"].lower()),
     )
+
+
+def recordings_dir(cfg):
+    record_cfg = cfg.get("record", {})
+    return Path(str(record_cfg.get("output_dir", "recordings")))
+
+
+def list_recordings(cfg):
+    base_dir = recordings_dir(cfg)
+    if not base_dir.exists():
+        return []
+
+    files = []
+    for path in sorted(base_dir.glob("*.ubx"), key=lambda item: item.stat().st_mtime, reverse=True):
+        stat = path.stat()
+        files.append(
+            {
+                "name": path.name,
+                "size": stat.st_size,
+                "modified": int(stat.st_mtime),
+                "download_path": f"/downloads/{path.name}",
+            }
+        )
+    return files
+
+
+def resolve_recording_path(cfg, name):
+    safe_name = Path(name).name
+    if safe_name != name:
+        return None
+    path = recordings_dir(cfg) / safe_name
+    try:
+        path.resolve().relative_to(recordings_dir(cfg).resolve())
+    except Exception:
+        return None
+    return path
 
 
 def run_portal(config_path):

@@ -54,6 +54,7 @@ python -m rtkbox base-ntrip
 python -m rtkbox rover-local
 python -m rtkbox rover-ntrip
 python -m rtkbox receiver-bridge
+python -m rtkbox record
 python -m rtkbox nmea
 python -m rtkbox portal
 ```
@@ -71,6 +72,7 @@ python -m rtkbox --config config.yaml base-local
 - `rover-local`: LAN TCP client (`tcpcli://`) -> receiver serial
 - `rover-ntrip`: NTRIP client (`ntrip://` or `ntripc://`) -> receiver serial
 - `receiver-bridge`: bidirectional TCP bridge for remote `u-center` access to the receiver
+- `record`: record raw UBX from the receiver directly on the Pi for PPP workflows
 - `nmea`: print serial NMEA lines (starting with `$`) with auto reconnect
 - `portal`: start a small local control page for config editing and mode start/stop
 
@@ -124,11 +126,11 @@ This mode uses `str2str -b 1` so traffic is relayed both ways:
 
 ## PPP survey workflow
 
-This project does not have a separate `PPP` mode. The practical PPP workflow with this setup is:
+This project now has a simple `record` mode for PPP capture. The practical PPP workflow with this setup is:
 
 1. use `receiver-bridge` to access the ZED-F9P from `u-center`
 2. enable raw satellite messages on the receiver
-3. record a long `.ubx` file from a fixed antenna location
+3. use `record` mode in the portal to save a long `.ubx` file on the Pi
 4. convert the `.ubx` file to RINEX
 5. submit the RINEX observation file to a PPP service
 6. take the solved coordinates and program the base receiver as a fixed base
@@ -212,9 +214,25 @@ RAWX is binary, so you should verify it in the packet viewer, not the text conso
 ![CFG-MSG SFRBX](images/ppp-04-cfg-msg-sfrbx.png)
 ![Packet Viewer RAWX](images/ppp-05-packet-viewer-rawx.png)
 
-### Step 5. Record a `.ubx` file
+### Step 5. Record a `.ubx` file on the Pi
 
-In `u-center`, click the record button and save to a `.ubx` file.
+In the portal:
+
+1. select `record`
+2. click `Start`
+3. let it run for the survey duration you want
+4. watch the elapsed timer in the `Logs` view
+5. click `Stop` when finished
+6. download the finished `.ubx` file from the `Recordings` list in the same view
+
+The file is stored on the Pi in the configured record output directory:
+
+```yaml
+record:
+  serial_port: /dev/ttyACM0
+  baud: 115200
+  output_dir: recordings
+```
 
 Guidance:
 
@@ -226,7 +244,7 @@ Guidance:
 Do not move the antenna during the recording.
 
 
-![u-center Record UBX](images/ppp-06-u-center-record-ubx.png)
+![Portal Record Mode](images/ppp-06-portal-record-mode.png)
 
 ### Step 6. Convert the `.ubx` file to RINEX
 
@@ -314,6 +332,8 @@ The portal lets you:
 - choose one of the RTK/NMEA modes
 - start or stop the selected mode
 - view recent logs that auto-refresh in real time
+- monitor active PPP recording time and current file size in `record` mode
+- download finished `.ubx` recordings from the browser
 
 This project provides the control page only. True captive portal redirect still depends on your Pi access-point setup such as `hostapd`, `dnsmasq`, and HTTP/DNS redirect rules.
 
