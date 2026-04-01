@@ -201,12 +201,18 @@ function renderStatus(status) {
     logBox.scrollTop = logBox.scrollHeight;
   }
 
-  if (modeSelect.value === "nmea") {
-    renderLatestNmeaPosition(rows);
-  }
-
   renderRecordingStatus(status.recording);
   updateRecordingsVisibility();
+
+  const runtime = status.receiver_runtime || null;
+  const modeIsNmea = modeSelect.value === "nmea";
+  const preferNmea = modeIsNmea && (!runtime || !runtime.available || runtime.stale);
+  if (preferNmea && renderLatestNmeaPosition(rows)) {
+    return;
+  }
+  if (runtime) {
+    renderReceiverRuntime(runtime);
+  }
 }
 
 function updatePositionPanelVisibility() {
@@ -255,36 +261,14 @@ async function refreshStatus() {
 }
 
 async function refreshRecordings() {
+  if (modeSelect.value !== "record") {
+    return;
+  }
   try {
     const payload = await apiGet("/api/recordings");
     renderRecordings(payload.files || []);
   } catch (error) {
     recordingsList.textContent = `Failed to load recordings: ${error.message}`;
-  }
-}
-
-async function refreshReceiverRuntime() {
-  const controlView = document.getElementById("view-control");
-  if (!controlView || !controlView.classList.contains("active")) {
-    return;
-  }
-  if (modeSelect.value === "nmea") {
-    return;
-  }
-  if (latestStatus.running && latestStatus.current_mode) {
-    mapHint.textContent = `Live receiver poll paused while '${latestStatus.current_mode}' is running (serial in use).`;
-    return;
-  }
-
-  try {
-    const runtime = await apiGet("/api/receiver/runtime");
-    renderReceiverRuntime(runtime);
-  } catch (error) {
-    if (String(error.message).includes("non-JSON response")) {
-      mapHint.textContent = "Receiver poll endpoint unavailable. Restart the portal service to load latest backend.";
-      return;
-    }
-    mapHint.textContent = `Receiver poll failed: ${error.message}`;
   }
 }
 
@@ -446,6 +430,20 @@ function formatBytes(size) {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatAgeCompact(seconds) {
+  const value = Math.max(0, Number(seconds) || 0);
+  if (value < 1) {
+    return "now";
+  }
+  if (value < 60) {
+    return `${Math.floor(value)}s ago`;
+  }
+  if (value < 3600) {
+    return `${Math.floor(value / 60)}m ago`;
+  }
+  return `${Math.floor(value / 3600)}h ago`;
+}
+
 function renderRecordings(files) {
   recordingsList.innerHTML = "";
 
@@ -488,7 +486,7 @@ function renderReceiverRuntime(runtime) {
     lonValue.textContent = "-";
     accValue.textContent = "-";
     surveyValue.textContent = "-";
-    coordSource.textContent = "receiver poll";
+    coordSource.textContent = "receiver cache";
     mapHint.textContent = runtime.message
       ? `Receiver unavailable: ${runtime.message}`
       : "Waiting for receiver position...";
@@ -507,7 +505,7 @@ function renderReceiverRuntime(runtime) {
   latValue.textContent = Number.isFinite(lat) ? lat.toFixed(7) : "-";
   lonValue.textContent = Number.isFinite(lon) ? lon.toFixed(7) : "-";
   accValue.textContent = Number.isFinite(acc) ? `${acc.toFixed(3)} m` : "-";
-  coordSource.textContent = "receiver poll";
+  coordSource.textContent = runtime.stale ? "receiver cache (stale)" : "receiver cache";
 
   if (mode === "survey") {
     const partAcc = Number.isFinite(svinAcc) ? `${svinAcc.toFixed(3)} m` : "-";
@@ -527,7 +525,14 @@ function renderReceiverRuntime(runtime) {
     const latLng = [lat, lon];
     marker.setLatLng(latLng);
     map.setView(latLng, 16);
-    mapHint.textContent = "Receiver position from direct UBX poll.";
+    const ageText = formatAgeCompact(runtime.age_s);
+    if (runtime.stale) {
+      mapHint.textContent = runtime.message
+        ? `Showing cached receiver position (${ageText}). ${runtime.message}`
+        : `Showing cached receiver position (${ageText}).`;
+    } else {
+      mapHint.textContent = `Receiver position from centralized runtime (${ageText}).`;
+    }
   } else {
     mapHint.textContent = "Receiver position unavailable.";
   }
@@ -603,8 +608,9 @@ function renderLatestNmeaPosition(rows) {
       marker.setLatLng(latLng);
       map.setView(latLng, 16);
     }
-    return;
+    return true;
   }
+  return false;
 }
 
 function initMap() {
@@ -629,9 +635,7 @@ function switchView(viewName) {
     view.classList.toggle("active", view.id === `view-${viewName}`);
   });
 
-  if (viewName === "control") {
-    refreshReceiverRuntime();
-  }
+  refreshRecordings();
 }
 
 menuButtons.forEach((button) => {
@@ -661,7 +665,6 @@ loadConfig()
   .then(async () => {
     await refreshStatus();
     await refreshRecordings();
-    await refreshReceiverRuntime();
     await readTmodeStatus();
   })
   .catch((error) => {
@@ -670,4 +673,3 @@ loadConfig()
 
 window.setInterval(refreshStatus, 1000);
 window.setInterval(refreshRecordings, 5000);
-window.setInterval(refreshReceiverRuntime, 2000);

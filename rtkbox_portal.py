@@ -6,19 +6,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import mimetypes
-import struct
 import threading
 import time
 
-import serial
-
 from rtkbox_config import MODES, detect_local_ip, load_config, save_config
 from rtkbox_modes import Runner, run_mode
+from rtkbox_serial_service import receiver_service
 
 
 WEB_DIR = Path(__file__).with_name("web")
 LOG_LIMIT = 200
-RECEIVER_IO_LOCK = threading.Lock()
 
 
 class AppState(Runner):
@@ -29,6 +26,17 @@ class AppState(Runner):
         self.worker = None
         self.current_mode = None
         self.last_error = ""
+        self.receiver_runtime = {
+            "serial_port": "",
+            "baud": 0,
+            "available": False,
+            "message": "Runtime cache warming up.",
+            "stale": True,
+            "updated_at": 0,
+            "polled_at": 0,
+        }
+        self._runtime_stop_event = threading.Event()
+        self._runtime_thread = None
 
     def log(self, message):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -43,6 +51,12 @@ class AppState(Runner):
             recording = dict(self.runtime.get("recording") or {}) if self.runtime.get("recording") else None
             if recording and recording.get("started_at"):
                 recording["elapsed_seconds"] = int(max(0, time.time() - recording["started_at"]))
+            receiver_runtime = dict(self.receiver_runtime)
+            updated_at = float(receiver_runtime.get("updated_at") or 0)
+            if updated_at > 0:
+                receiver_runtime["age_s"] = max(0.0, time.time() - updated_at)
+            else:
+                receiver_runtime["age_s"] = None
             return {
                 "running": running,
                 "current_mode": self.current_mode,
@@ -50,6 +64,7 @@ class AppState(Runner):
                 "logs": list(self.logs),
                 "log_limit": LOG_LIMIT,
                 "recording": recording,
+                "receiver_runtime": receiver_runtime,
             }
 
     def load_config(self):
@@ -106,6 +121,63 @@ class AppState(Runner):
             self.stop_event.clear()
             self.log(f"Mode ended: {mode}")
 
+    def start_runtime_poller(self):
+        with self._lock:
+            if self._runtime_thread is not None and self._runtime_thread.is_alive():
+                return
+            self._runtime_stop_event = threading.Event()
+            self._runtime_thread = threading.Thread(target=self._runtime_poll_loop, daemon=True)
+            self._runtime_thread.start()
+        self.log("Receiver runtime poller started.")
+
+    def stop_runtime_poller(self):
+        self._runtime_stop_event.set()
+        thread = self._runtime_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2)
+        with self._lock:
+            self._runtime_thread = None
+
+    def get_receiver_runtime(self):
+        with self._lock:
+            data = dict(self.receiver_runtime)
+        updated_at = float(data.get("updated_at") or 0)
+        if updated_at > 0:
+            data["age_s"] = max(0.0, time.time() - updated_at)
+        else:
+            data["age_s"] = None
+        return data
+
+    def _runtime_poll_loop(self):
+        poll_interval_s = 2.0
+        while not self._runtime_stop_event.is_set():
+            polled_at = time.time()
+            cfg = self.load_config()
+            runtime = read_receiver_runtime(cfg)
+            runtime["polled_at"] = polled_at
+
+            with self._lock:
+                prev = dict(self.receiver_runtime)
+
+                if runtime.get("available"):
+                    runtime["stale"] = False
+                    runtime["updated_at"] = polled_at
+                    self.receiver_runtime = runtime
+                else:
+                    # Preserve last good fix if we temporarily lose direct access,
+                    # but expose current poll error to the UI.
+                    if prev.get("available"):
+                        prev["stale"] = True
+                        prev["message"] = str(runtime.get("message") or "")
+                        prev["polled_at"] = polled_at
+                        self.receiver_runtime = prev
+                    else:
+                        runtime["stale"] = True
+                        runtime["updated_at"] = float(prev.get("updated_at") or 0)
+                        self.receiver_runtime = runtime
+
+            self._runtime_stop_event.wait(timeout=poll_interval_s)
+
 
 class PortalHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -125,7 +197,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             self._send_json(self.server.app_state.snapshot())
             return
         if self.path == "/api/receiver/runtime":
-            self._send_json(read_receiver_runtime(self.server.app_state.load_config()))
+            self._send_json(self.server.app_state.get_receiver_runtime())
             return
         if self.path == "/api/receiver/tmode3":
             self._send_json(read_receiver_tmode3(self.server.app_state.load_config()))
@@ -323,276 +395,12 @@ def resolve_recording_path(cfg, name):
     return path
 
 
-def receiver_serial_target(cfg):
-    receiver_bridge = cfg.get("receiver_bridge", {})
-    serial_cfg = cfg.get("serial", {})
-    port = str(receiver_bridge.get("serial_port") or serial_cfg.get("port") or "/dev/ttyACM0")
-    baud = int(receiver_bridge.get("baud") or serial_cfg.get("baud") or 115200)
-    if not port.startswith("/dev/"):
-        port = f"/dev/{port}"
-    return port, baud
-
-
-def ubx_checksum(data):
-    ck_a = 0
-    ck_b = 0
-    for byte in data:
-        ck_a = (ck_a + byte) & 0xFF
-        ck_b = (ck_b + ck_a) & 0xFF
-    return bytes([ck_a, ck_b])
-
-
-def ubx_frame(msg_class, msg_id, payload=b""):
-    header = bytes([msg_class, msg_id]) + struct.pack("<H", len(payload))
-    return b"\xB5\x62" + header + payload + ubx_checksum(header + payload)
-
-
-def read_ubx_message(ser, timeout_s=1.5):
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        start = ser.read(1)
-        if start != b"\xB5":
-            continue
-        if ser.read(1) != b"\x62":
-            continue
-        header = ser.read(4)
-        if len(header) != 4:
-            continue
-        msg_class, msg_id, payload_len = header[0], header[1], struct.unpack("<H", header[2:4])[0]
-        payload = ser.read(payload_len)
-        checksum = ser.read(2)
-        if len(payload) != payload_len or len(checksum) != 2:
-            continue
-        if ubx_checksum(header + payload) != checksum:
-            continue
-        return msg_class, msg_id, payload
-    return None
-
-
-def send_ubx_and_wait_ack(ser, msg_class, msg_id, payload=b"", timeout_s=1.5):
-    ser.reset_input_buffer()
-    ser.write(ubx_frame(msg_class, msg_id, payload))
-    ser.flush()
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        message = read_ubx_message(ser, timeout_s=max(0.1, deadline - time.time()))
-        if message is None:
-            break
-        cls, mid, pl = message
-        if cls == 0x05 and mid == 0x01 and len(pl) >= 2 and pl[0] == msg_class and pl[1] == msg_id:
-            return
-        if cls == 0x05 and mid == 0x00 and len(pl) >= 2 and pl[0] == msg_class and pl[1] == msg_id:
-            raise RuntimeError(f"Receiver NAK for UBX-{msg_class:02X}-{msg_id:02X}")
-    raise RuntimeError(f"No ACK for UBX-{msg_class:02X}-{msg_id:02X}")
-
-
-def poll_tmode3_payload(ser):
-    ser.reset_input_buffer()
-    ser.write(ubx_frame(0x06, 0x71, b""))
-    ser.flush()
-    deadline = time.time() + 1.5
-    while time.time() < deadline:
-        message = read_ubx_message(ser, timeout_s=max(0.1, deadline - time.time()))
-        if message is None:
-            break
-        msg_class, msg_id, payload = message
-        if msg_class == 0x06 and msg_id == 0x71:
-            return payload
-    raise RuntimeError("No response to UBX-CFG-TMODE3 poll")
-
-
-def poll_nav_pvt_payload(ser):
-    ser.reset_input_buffer()
-    ser.write(ubx_frame(0x01, 0x07, b""))
-    ser.flush()
-    deadline = time.time() + 1.5
-    while time.time() < deadline:
-        message = read_ubx_message(ser, timeout_s=max(0.1, deadline - time.time()))
-        if message is None:
-            break
-        msg_class, msg_id, payload = message
-        if msg_class == 0x01 and msg_id == 0x07:
-            return payload
-    raise RuntimeError("No response to UBX-NAV-PVT poll")
-
-
-def poll_nav_svin_payload(ser):
-    ser.reset_input_buffer()
-    ser.write(ubx_frame(0x01, 0x3B, b""))
-    ser.flush()
-    deadline = time.time() + 1.5
-    while time.time() < deadline:
-        message = read_ubx_message(ser, timeout_s=max(0.1, deadline - time.time()))
-        if message is None:
-            break
-        msg_class, msg_id, payload = message
-        if msg_class == 0x01 and msg_id == 0x3B:
-            return payload
-    raise RuntimeError("No response to UBX-NAV-SVIN poll")
-
-
-def parse_tmode3_payload(payload):
-    if len(payload) < 32:
-        raise RuntimeError("Invalid UBX-CFG-TMODE3 response payload length")
-    version = payload[0]
-    flags = struct.unpack("<H", payload[2:4])[0]
-    mode_code = flags & 0xFF
-    mode = {0: "disabled", 1: "survey", 2: "fixed"}.get(mode_code, f"unknown({mode_code})")
-    lla = bool(flags & 0x100)
-
-    x_cm, y_cm, z_cm = struct.unpack("<iii", payload[4:16])
-    x_hp, y_hp, z_hp = struct.unpack("<bbb", payload[16:19])
-    fixed_pos_acc, svin_min_dur, svin_acc_limit = struct.unpack("<III", payload[20:32])
-
-    return {
-        "version": int(version),
-        "mode": mode,
-        "flags": int(flags),
-        "lla": lla,
-        "ecef_x_m": (x_cm / 100.0) + (x_hp / 10000.0),
-        "ecef_y_m": (y_cm / 100.0) + (y_hp / 10000.0),
-        "ecef_z_m": (z_cm / 100.0) + (z_hp / 10000.0),
-        "fixed_pos_acc_0_1mm": int(fixed_pos_acc),
-        "survey_min_dur_s": int(svin_min_dur),
-        "survey_acc_limit_0_1mm": int(svin_acc_limit),
-    }
-
-
-def parse_nav_pvt_payload(payload):
-    if len(payload) < 44:
-        raise RuntimeError("Invalid UBX-NAV-PVT payload length")
-    lon = struct.unpack("<i", payload[24:28])[0] * 1e-7
-    lat = struct.unpack("<i", payload[28:32])[0] * 1e-7
-    h_acc_mm = struct.unpack("<I", payload[40:44])[0]
-    return {
-        "lat_deg": lat,
-        "lon_deg": lon,
-        "h_acc_m": h_acc_mm / 1000.0,
-    }
-
-
-def parse_nav_svin_payload(payload):
-    if len(payload) < 34:
-        raise RuntimeError("Invalid UBX-NAV-SVIN payload length")
-    # Newer receivers may return a v0 40-byte payload:
-    #   version(1), reserved1(3), iTOW(4), dur(4), ...
-    # with valid/active at bytes 36/37.
-    if len(payload) >= 40 and payload[1:4] == b"\x00\x00\x00":
-        dur = struct.unpack("<I", payload[8:12])[0]
-        mean_acc_0_1mm = struct.unpack("<I", payload[28:32])[0]
-        valid = bool(payload[36])
-        active = bool(payload[37])
-        return {
-            "svin_duration_s": int(dur),
-            "svin_accuracy_m": mean_acc_0_1mm * 0.0001,
-            "svin_valid": valid,
-            "svin_active": active,
-        }
-
-    # Legacy layout fallback.
-    dur = struct.unpack("<I", payload[4:8])[0]
-    mean_acc_0_1mm = struct.unpack("<I", payload[24:28])[0]
-    valid = bool(payload[32])
-    active = bool(payload[33])
-    return {
-        "svin_duration_s": int(dur),
-        "svin_accuracy_m": mean_acc_0_1mm * 0.0001,
-        "svin_valid": valid,
-        "svin_active": active,
-    }
-
-
 def read_receiver_runtime(cfg):
-    port, baud = receiver_serial_target(cfg)
-    result = {
-        "serial_port": port,
-        "baud": baud,
-        "available": False,
-        "message": "",
-    }
-    try:
-        with RECEIVER_IO_LOCK:
-            with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
-                tmode = parse_tmode3_payload(poll_tmode3_payload(ser))
-                pvt = parse_nav_pvt_payload(poll_nav_pvt_payload(ser))
-                svin = parse_nav_svin_payload(poll_nav_svin_payload(ser))
-
-        result.update(
-            {
-                "available": True,
-                "tmode_mode": tmode.get("mode"),
-                "lat_deg": pvt.get("lat_deg"),
-                "lon_deg": pvt.get("lon_deg"),
-                "h_acc_m": pvt.get("h_acc_m"),
-                "svin_duration_s": svin.get("svin_duration_s"),
-                "svin_accuracy_m": svin.get("svin_accuracy_m"),
-                "svin_valid": svin.get("svin_valid"),
-                "svin_active": svin.get("svin_active"),
-            }
-        )
-    except Exception as exc:
-        result["message"] = str(exc)
-
-    return result
-
-
-def meters_to_cm_and_hp(meters):
-    total_0_1mm = int(round(float(meters) * 10000.0))
-    cm = int(total_0_1mm / 100)
-    hp = total_0_1mm - (cm * 100)
-    if hp < -99:
-        hp = -99
-    if hp > 99:
-        hp = 99
-    return cm, hp
-
-
-def build_tmode3_payload_for_mode(
-    existing_payload,
-    mode,
-    survey_min_dur,
-    survey_acc_limit,
-    fixed_ecef_x_m=None,
-    fixed_ecef_y_m=None,
-    fixed_ecef_z_m=None,
-):
-    payload = bytearray(existing_payload)
-    if len(payload) < 40:
-        payload = bytearray(payload.ljust(40, b"\x00"))
-
-    flags = struct.unpack("<H", payload[2:4])[0]
-    flags = flags & 0xFE00
-    if mode == "survey":
-        flags |= 1
-        payload[24:28] = struct.pack("<I", max(1, survey_min_dur))
-        payload[28:32] = struct.pack("<I", max(1, survey_acc_limit))
-    elif mode == "fixed":
-        flags |= 2
-        if fixed_ecef_x_m is not None and fixed_ecef_y_m is not None and fixed_ecef_z_m is not None:
-            x_cm, x_hp = meters_to_cm_and_hp(fixed_ecef_x_m)
-            y_cm, y_hp = meters_to_cm_and_hp(fixed_ecef_y_m)
-            z_cm, z_hp = meters_to_cm_and_hp(fixed_ecef_z_m)
-            payload[4:8] = struct.pack("<i", x_cm)
-            payload[8:12] = struct.pack("<i", y_cm)
-            payload[12:16] = struct.pack("<i", z_cm)
-            payload[16:17] = struct.pack("<b", x_hp)
-            payload[17:18] = struct.pack("<b", y_hp)
-            payload[18:19] = struct.pack("<b", z_hp)
-    else:
-        raise ValueError("mode must be 'survey' or 'fixed'")
-    payload[2:4] = struct.pack("<H", flags)
-    return bytes(payload)
+    return receiver_service.read_runtime(cfg)
 
 
 def read_receiver_tmode3(cfg):
-    port, baud = receiver_serial_target(cfg)
-    with RECEIVER_IO_LOCK:
-        with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
-            payload = poll_tmode3_payload(ser)
-    status = parse_tmode3_payload(payload)
-    status["serial_port"] = port
-    status["baud"] = baud
-    return status
+    return receiver_service.read_tmode3(cfg)
 
 
 def apply_receiver_tmode3(
@@ -604,38 +412,19 @@ def apply_receiver_tmode3(
     fixed_ecef_y_m=None,
     fixed_ecef_z_m=None,
 ):
-    if mode == "fixed":
-        provided = [fixed_ecef_x_m, fixed_ecef_y_m, fixed_ecef_z_m]
-        if any(value is not None for value in provided) and not all(value is not None for value in provided):
-            raise ValueError("fixed mode requires all of fixed_ecef_x_m, fixed_ecef_y_m, fixed_ecef_z_m")
-    port, baud = receiver_serial_target(cfg)
-    with RECEIVER_IO_LOCK:
-        with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
-            existing = poll_tmode3_payload(ser)
-            payload = build_tmode3_payload_for_mode(
-                existing,
-                mode,
-                survey_min_dur,
-                survey_acc_limit,
-                fixed_ecef_x_m=fixed_ecef_x_m,
-                fixed_ecef_y_m=fixed_ecef_y_m,
-                fixed_ecef_z_m=fixed_ecef_z_m,
-            )
-            send_ubx_and_wait_ack(ser, 0x06, 0x71, payload)
-            confirmed = poll_tmode3_payload(ser)
-    status = parse_tmode3_payload(confirmed)
-    status["serial_port"] = port
-    status["baud"] = baud
-    return status
+    return receiver_service.apply_tmode3(
+        cfg,
+        mode=mode,
+        survey_min_dur=survey_min_dur,
+        survey_acc_limit=survey_acc_limit,
+        fixed_ecef_x_m=fixed_ecef_x_m,
+        fixed_ecef_y_m=fixed_ecef_y_m,
+        fixed_ecef_z_m=fixed_ecef_z_m,
+    )
 
 
 def save_receiver_config(cfg):
-    port, baud = receiver_serial_target(cfg)
-    save_mask = 0x0000FFFF
-    payload = struct.pack("<IIIB", 0, save_mask, 0, 0x03)
-    with RECEIVER_IO_LOCK:
-        with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
-            send_ubx_and_wait_ack(ser, 0x06, 0x09, payload)
+    receiver_service.save_to_bbr_flash(cfg)
 
 
 def run_portal(config_path):
@@ -645,6 +434,7 @@ def run_portal(config_path):
     port = int(app_cfg.get("portal_port", 8080))
 
     state = AppState(config_path)
+    state.start_runtime_poller()
     httpd = ThreadingHTTPServer((host, port), PortalHandler)
     httpd.app_state = state
 
@@ -666,6 +456,8 @@ def run_portal(config_path):
         pass
     finally:
         state.stop_mode()
+        state.stop_runtime_poller()
+        receiver_service.stop_stream()
         httpd.server_close()
         print("Portal stopped.", flush=True)
 
