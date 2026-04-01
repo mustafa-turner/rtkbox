@@ -10,6 +10,8 @@ const menuButtons = document.querySelectorAll(".menu-button");
 const views = document.querySelectorAll(".view");
 const latValue = document.getElementById("latValue");
 const lonValue = document.getElementById("lonValue");
+const accValue = document.getElementById("accValue");
+const surveyValue = document.getElementById("surveyValue");
 const coordSource = document.getElementById("coordSource");
 const mapHint = document.getElementById("mapHint");
 const positionPanel = document.getElementById("positionPanel");
@@ -34,6 +36,7 @@ const MODES = ["base-local", "base-ntrip", "rover-local", "rover-ntrip", "receiv
 const MAX_RENDERED_LOGS = 120;
 let map;
 let marker;
+let latestStatus = { running: false, current_mode: "" };
 
 function setField(name, value) {
   const field = configForm.elements.namedItem(name);
@@ -181,6 +184,7 @@ async function apiPost(path, data) {
 }
 
 function renderStatus(status) {
+  latestStatus = status || { running: false, current_mode: "" };
   const modeText = status.current_mode ? ` ${status.current_mode}` : "";
   const stateText = status.running ? "running" : "idle";
   const errorText = status.last_error ? ` | last error: ${status.last_error}` : "";
@@ -197,15 +201,17 @@ function renderStatus(status) {
     logBox.scrollTop = logBox.scrollHeight;
   }
 
-  renderLatestPosition(rows);
+  if (modeSelect.value === "nmea") {
+    renderLatestNmeaPosition(rows);
+  }
+
   renderRecordingStatus(status.recording);
   updateRecordingsVisibility();
 }
 
 function updatePositionPanelVisibility() {
-  const show = modeSelect.value === "nmea";
-  positionPanel.classList.toggle("is-hidden", !show);
-  controlGrid.classList.toggle("map-hidden", !show);
+  positionPanel.classList.remove("is-hidden");
+  controlGrid.classList.remove("map-hidden");
 }
 
 function updateRecordingsVisibility() {
@@ -254,6 +260,31 @@ async function refreshRecordings() {
     renderRecordings(payload.files || []);
   } catch (error) {
     recordingsList.textContent = `Failed to load recordings: ${error.message}`;
+  }
+}
+
+async function refreshReceiverRuntime() {
+  const controlView = document.getElementById("view-control");
+  if (!controlView || !controlView.classList.contains("active")) {
+    return;
+  }
+  if (modeSelect.value === "nmea") {
+    return;
+  }
+  if (latestStatus.running && latestStatus.current_mode) {
+    mapHint.textContent = `Live receiver poll paused while '${latestStatus.current_mode}' is running (serial in use).`;
+    return;
+  }
+
+  try {
+    const runtime = await apiGet("/api/receiver/runtime");
+    renderReceiverRuntime(runtime);
+  } catch (error) {
+    if (String(error.message).includes("non-JSON response")) {
+      mapHint.textContent = "Receiver poll endpoint unavailable. Restart the portal service to load latest backend.";
+      return;
+    }
+    mapHint.textContent = `Receiver poll failed: ${error.message}`;
   }
 }
 
@@ -382,6 +413,28 @@ function formatDuration(totalSeconds) {
   return `${hours}:${minutes}:${secs}`;
 }
 
+function formatSurveyDurationCompact(totalSeconds) {
+  const seconds = Math.max(0, Number(totalSeconds) || 0);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  const years = Math.floor(days / 365);
+
+  if (years > 0) {
+    const remDays = days % 365;
+    return `${years}y ${remDays}d`;
+  }
+  if (days > 0) {
+    const remHours = hours % 24;
+    return `${days}d ${remHours}h`;
+  }
+  if (hours > 0) {
+    const remMinutes = minutes % 60;
+    return `${hours}h ${remMinutes}m`;
+  }
+  return `${minutes}m`;
+}
+
 function formatBytes(size) {
   const value = Number(size) || 0;
   if (value < 1024) {
@@ -429,18 +482,55 @@ function renderRecordings(files) {
   });
 }
 
-function initMap() {
-  if (!window.L) {
-    mapHint.textContent = "Map library unavailable. Coordinates still update below.";
+function renderReceiverRuntime(runtime) {
+  if (!runtime.available) {
+    latValue.textContent = "-";
+    lonValue.textContent = "-";
+    accValue.textContent = "-";
+    surveyValue.textContent = "-";
+    coordSource.textContent = "receiver poll";
+    mapHint.textContent = runtime.message
+      ? `Receiver unavailable: ${runtime.message}`
+      : "Waiting for receiver position...";
     return;
   }
 
-  map = window.L.map("map").setView([0, 0], 2);
-  window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-  }).addTo(map);
-  marker = window.L.marker([0, 0]).addTo(map);
+  const lat = Number(runtime.lat_deg);
+  const lon = Number(runtime.lon_deg);
+  const acc = Number(runtime.h_acc_m);
+  const mode = runtime.tmode_mode || "unknown";
+  const svinActive = Boolean(runtime.svin_active);
+  const svinValid = Boolean(runtime.svin_valid);
+  const svinAcc = Number(runtime.svin_accuracy_m);
+  const svinDur = Number(runtime.svin_duration_s || 0);
+
+  latValue.textContent = Number.isFinite(lat) ? lat.toFixed(7) : "-";
+  lonValue.textContent = Number.isFinite(lon) ? lon.toFixed(7) : "-";
+  accValue.textContent = Number.isFinite(acc) ? `${acc.toFixed(3)} m` : "-";
+  coordSource.textContent = "receiver poll";
+
+  if (mode === "survey") {
+    const partAcc = Number.isFinite(svinAcc) ? `${svinAcc.toFixed(3)} m` : "-";
+    const partDur = formatSurveyDurationCompact(svinDur);
+    surveyValue.textContent = svinActive
+      ? `surveying (${partDur}, acc ${partAcc})`
+      : svinValid
+        ? `survey complete (${partDur}, acc ${partAcc})`
+        : "survey pending";
+  } else if (mode === "fixed") {
+    surveyValue.textContent = "fixed mode";
+  } else {
+    surveyValue.textContent = mode;
+  }
+
+  if (Number.isFinite(lat) && Number.isFinite(lon) && map && marker) {
+    const latLng = [lat, lon];
+    marker.setLatLng(latLng);
+    map.setView(latLng, 16);
+    mapHint.textContent = "Receiver position from direct UBX poll.";
+  } else {
+    mapHint.textContent = "Receiver position unavailable.";
+  }
 }
 
 function nmeaToDecimal(raw, hemisphere, degreeDigits) {
@@ -454,7 +544,7 @@ function nmeaToDecimal(raw, hemisphere, degreeDigits) {
     return null;
   }
 
-  let value = degrees + minutes / 60;
+  let value = degrees + (minutes / 60);
   if (hemisphere === "S" || hemisphere === "W") {
     value *= -1;
   }
@@ -494,17 +584,19 @@ function parseNmeaPosition(line) {
   return null;
 }
 
-function renderLatestPosition(rows) {
+function renderLatestNmeaPosition(rows) {
   for (let i = rows.length - 1; i >= 0; i -= 1) {
     const position = parseNmeaPosition(rows[i]);
     if (!position || position.lat === null || position.lon === null) {
       continue;
     }
 
-    latValue.textContent = position.lat.toFixed(6);
-    lonValue.textContent = position.lon.toFixed(6);
+    latValue.textContent = position.lat.toFixed(7);
+    lonValue.textContent = position.lon.toFixed(7);
+    accValue.textContent = "-";
+    surveyValue.textContent = "nmea mode";
     coordSource.textContent = position.source;
-    mapHint.textContent = "Map uses OpenStreetMap tiles when internet is available.";
+    mapHint.textContent = "Position from NMEA stream.";
 
     if (map && marker) {
       const latLng = [position.lat, position.lon];
@@ -513,11 +605,20 @@ function renderLatestPosition(rows) {
     }
     return;
   }
+}
 
-  latValue.textContent = "-";
-  lonValue.textContent = "-";
-  coordSource.textContent = "-";
-  mapHint.textContent = "Waiting for NMEA position...";
+function initMap() {
+  if (!window.L) {
+    mapHint.textContent = "Map library unavailable. Coordinates still update below.";
+    return;
+  }
+
+  map = window.L.map("map").setView([0, 0], 2);
+  window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+  }).addTo(map);
+  marker = window.L.marker([0, 0]).addTo(map);
 }
 
 function switchView(viewName) {
@@ -527,6 +628,10 @@ function switchView(viewName) {
   views.forEach((view) => {
     view.classList.toggle("active", view.id === `view-${viewName}`);
   });
+
+  if (viewName === "control") {
+    refreshReceiverRuntime();
+  }
 }
 
 menuButtons.forEach((button) => {
@@ -556,6 +661,7 @@ loadConfig()
   .then(async () => {
     await refreshStatus();
     await refreshRecordings();
+    await refreshReceiverRuntime();
     await readTmodeStatus();
   })
   .catch((error) => {
@@ -564,3 +670,4 @@ loadConfig()
 
 window.setInterval(refreshStatus, 1000);
 window.setInterval(refreshRecordings, 5000);
+window.setInterval(refreshReceiverRuntime, 2000);

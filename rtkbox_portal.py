@@ -18,6 +18,7 @@ from rtkbox_modes import Runner, run_mode
 
 WEB_DIR = Path(__file__).with_name("web")
 LOG_LIMIT = 200
+RECEIVER_IO_LOCK = threading.Lock()
 
 
 class AppState(Runner):
@@ -122,6 +123,9 @@ class PortalHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/status":
             self._send_json(self.server.app_state.snapshot())
+            return
+        if self.path == "/api/receiver/runtime":
+            self._send_json(read_receiver_runtime(self.server.app_state.load_config()))
             return
         if self.path == "/api/receiver/tmode3":
             self._send_json(read_receiver_tmode3(self.server.app_state.load_config()))
@@ -397,6 +401,36 @@ def poll_tmode3_payload(ser):
     raise RuntimeError("No response to UBX-CFG-TMODE3 poll")
 
 
+def poll_nav_pvt_payload(ser):
+    ser.reset_input_buffer()
+    ser.write(ubx_frame(0x01, 0x07, b""))
+    ser.flush()
+    deadline = time.time() + 1.5
+    while time.time() < deadline:
+        message = read_ubx_message(ser, timeout_s=max(0.1, deadline - time.time()))
+        if message is None:
+            break
+        msg_class, msg_id, payload = message
+        if msg_class == 0x01 and msg_id == 0x07:
+            return payload
+    raise RuntimeError("No response to UBX-NAV-PVT poll")
+
+
+def poll_nav_svin_payload(ser):
+    ser.reset_input_buffer()
+    ser.write(ubx_frame(0x01, 0x3B, b""))
+    ser.flush()
+    deadline = time.time() + 1.5
+    while time.time() < deadline:
+        message = read_ubx_message(ser, timeout_s=max(0.1, deadline - time.time()))
+        if message is None:
+            break
+        msg_class, msg_id, payload = message
+        if msg_class == 0x01 and msg_id == 0x3B:
+            return payload
+    raise RuntimeError("No response to UBX-NAV-SVIN poll")
+
+
 def parse_tmode3_payload(payload):
     if len(payload) < 32:
         raise RuntimeError("Invalid UBX-CFG-TMODE3 response payload length")
@@ -422,6 +456,84 @@ def parse_tmode3_payload(payload):
         "survey_min_dur_s": int(svin_min_dur),
         "survey_acc_limit_0_1mm": int(svin_acc_limit),
     }
+
+
+def parse_nav_pvt_payload(payload):
+    if len(payload) < 44:
+        raise RuntimeError("Invalid UBX-NAV-PVT payload length")
+    lon = struct.unpack("<i", payload[24:28])[0] * 1e-7
+    lat = struct.unpack("<i", payload[28:32])[0] * 1e-7
+    h_acc_mm = struct.unpack("<I", payload[40:44])[0]
+    return {
+        "lat_deg": lat,
+        "lon_deg": lon,
+        "h_acc_m": h_acc_mm / 1000.0,
+    }
+
+
+def parse_nav_svin_payload(payload):
+    if len(payload) < 34:
+        raise RuntimeError("Invalid UBX-NAV-SVIN payload length")
+    # Newer receivers may return a v0 40-byte payload:
+    #   version(1), reserved1(3), iTOW(4), dur(4), ...
+    # with valid/active at bytes 36/37.
+    if len(payload) >= 40 and payload[1:4] == b"\x00\x00\x00":
+        dur = struct.unpack("<I", payload[8:12])[0]
+        mean_acc_0_1mm = struct.unpack("<I", payload[28:32])[0]
+        valid = bool(payload[36])
+        active = bool(payload[37])
+        return {
+            "svin_duration_s": int(dur),
+            "svin_accuracy_m": mean_acc_0_1mm * 0.0001,
+            "svin_valid": valid,
+            "svin_active": active,
+        }
+
+    # Legacy layout fallback.
+    dur = struct.unpack("<I", payload[4:8])[0]
+    mean_acc_0_1mm = struct.unpack("<I", payload[24:28])[0]
+    valid = bool(payload[32])
+    active = bool(payload[33])
+    return {
+        "svin_duration_s": int(dur),
+        "svin_accuracy_m": mean_acc_0_1mm * 0.0001,
+        "svin_valid": valid,
+        "svin_active": active,
+    }
+
+
+def read_receiver_runtime(cfg):
+    port, baud = receiver_serial_target(cfg)
+    result = {
+        "serial_port": port,
+        "baud": baud,
+        "available": False,
+        "message": "",
+    }
+    try:
+        with RECEIVER_IO_LOCK:
+            with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
+                tmode = parse_tmode3_payload(poll_tmode3_payload(ser))
+                pvt = parse_nav_pvt_payload(poll_nav_pvt_payload(ser))
+                svin = parse_nav_svin_payload(poll_nav_svin_payload(ser))
+
+        result.update(
+            {
+                "available": True,
+                "tmode_mode": tmode.get("mode"),
+                "lat_deg": pvt.get("lat_deg"),
+                "lon_deg": pvt.get("lon_deg"),
+                "h_acc_m": pvt.get("h_acc_m"),
+                "svin_duration_s": svin.get("svin_duration_s"),
+                "svin_accuracy_m": svin.get("svin_accuracy_m"),
+                "svin_valid": svin.get("svin_valid"),
+                "svin_active": svin.get("svin_active"),
+            }
+        )
+    except Exception as exc:
+        result["message"] = str(exc)
+
+    return result
 
 
 def meters_to_cm_and_hp(meters):
@@ -474,8 +586,9 @@ def build_tmode3_payload_for_mode(
 
 def read_receiver_tmode3(cfg):
     port, baud = receiver_serial_target(cfg)
-    with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
-        payload = poll_tmode3_payload(ser)
+    with RECEIVER_IO_LOCK:
+        with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
+            payload = poll_tmode3_payload(ser)
     status = parse_tmode3_payload(payload)
     status["serial_port"] = port
     status["baud"] = baud
@@ -496,19 +609,20 @@ def apply_receiver_tmode3(
         if any(value is not None for value in provided) and not all(value is not None for value in provided):
             raise ValueError("fixed mode requires all of fixed_ecef_x_m, fixed_ecef_y_m, fixed_ecef_z_m")
     port, baud = receiver_serial_target(cfg)
-    with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
-        existing = poll_tmode3_payload(ser)
-        payload = build_tmode3_payload_for_mode(
-            existing,
-            mode,
-            survey_min_dur,
-            survey_acc_limit,
-            fixed_ecef_x_m=fixed_ecef_x_m,
-            fixed_ecef_y_m=fixed_ecef_y_m,
-            fixed_ecef_z_m=fixed_ecef_z_m,
-        )
-        send_ubx_and_wait_ack(ser, 0x06, 0x71, payload)
-        confirmed = poll_tmode3_payload(ser)
+    with RECEIVER_IO_LOCK:
+        with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
+            existing = poll_tmode3_payload(ser)
+            payload = build_tmode3_payload_for_mode(
+                existing,
+                mode,
+                survey_min_dur,
+                survey_acc_limit,
+                fixed_ecef_x_m=fixed_ecef_x_m,
+                fixed_ecef_y_m=fixed_ecef_y_m,
+                fixed_ecef_z_m=fixed_ecef_z_m,
+            )
+            send_ubx_and_wait_ack(ser, 0x06, 0x71, payload)
+            confirmed = poll_tmode3_payload(ser)
     status = parse_tmode3_payload(confirmed)
     status["serial_port"] = port
     status["baud"] = baud
@@ -519,8 +633,9 @@ def save_receiver_config(cfg):
     port, baud = receiver_serial_target(cfg)
     save_mask = 0x0000FFFF
     payload = struct.pack("<IIIB", 0, save_mask, 0, 0x03)
-    with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
-        send_ubx_and_wait_ack(ser, 0x06, 0x09, payload)
+    with RECEIVER_IO_LOCK:
+        with serial.Serial(port=port, baudrate=baud, timeout=0.2) as ser:
+            send_ubx_and_wait_ack(ser, 0x06, 0x09, payload)
 
 
 def run_portal(config_path):
