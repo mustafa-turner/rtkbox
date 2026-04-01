@@ -38,6 +38,17 @@ let map;
 let marker;
 let latestStatus = { running: false, current_mode: "" };
 
+function getEffectiveMode() {
+  if (latestStatus.running && latestStatus.current_mode) {
+    return latestStatus.current_mode;
+  }
+  return modeSelect.value;
+}
+
+function isNmeaModeActive() {
+  return getEffectiveMode() === "nmea";
+}
+
 function setField(name, value) {
   const field = configForm.elements.namedItem(name);
   if (field) {
@@ -201,7 +212,7 @@ function renderStatus(status) {
     logBox.scrollTop = logBox.scrollHeight;
   }
 
-  if (modeSelect.value === "nmea") {
+  if (isNmeaModeActive()) {
     renderLatestNmeaPosition(rows);
   }
 
@@ -210,8 +221,14 @@ function renderStatus(status) {
 }
 
 function updatePositionPanelVisibility() {
-  positionPanel.classList.remove("is-hidden");
-  controlGrid.classList.remove("map-hidden");
+  const showPositionPanel = isNmeaModeActive();
+  positionPanel.classList.toggle("is-hidden", !showPositionPanel);
+  const showMap = isNmeaModeActive();
+  controlGrid.classList.toggle("map-hidden", !showMap);
+
+  if (showMap && map) {
+    window.setTimeout(() => map.invalidateSize(), 0);
+  }
 }
 
 function updateRecordingsVisibility() {
@@ -268,7 +285,7 @@ async function refreshReceiverRuntime() {
   if (!controlView || !controlView.classList.contains("active")) {
     return;
   }
-  if (modeSelect.value === "nmea") {
+  if (isNmeaModeActive()) {
     return;
   }
   if (latestStatus.running && latestStatus.current_mode) {
