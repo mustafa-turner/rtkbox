@@ -2,6 +2,110 @@
 
 Python utility for Raspberry Pi + Waveshare ZED-F9P RTK workflows.
 
+## For Raspberry Pi users
+
+This setup guide is written for Raspberry Pi users running Raspberry Pi OS.
+
+## Quick start (Raspberry Pi)
+
+### 1. Install system packages
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip
+```
+
+### 2. Install RTKLIB (`str2str`)
+
+`rtkbox` uses `str2str`, which is included in the `rtklib` package.
+
+```bash
+sudo apt update
+sudo apt install -y rtklib
+```
+
+Verify `str2str` is available:
+
+```bash
+str2str -h
+```
+
+If you cannot install `rtklib` from apt and need a fallback build:
+
+```bash
+sudo apt install -y git build-essential
+git clone --depth 1 https://github.com/tomojitakasu/RTKLIB.git ~/RTKLIB
+cd ~/RTKLIB/app/consapp/str2str/gcc
+make
+sudo install -m 755 str2str /usr/local/bin/str2str
+```
+
+### 3. Create and activate a Python virtual environment
+
+From this project directory:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+### 4. Install Python dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+### 5. Create your local config
+
+```bash
+cp config.example.yaml config.yaml
+```
+
+Then edit `config.yaml` with your local values.
+
+Before running a mode, confirm the correct ZED-F9P serial device path and update your config.
+
+On Linux/Raspberry Pi, serial devices usually appear under `/dev/` and start with `tty...`, for example:
+
+- `/dev/ttyAMA0` (Pi UART)
+- `/dev/ttyACM0` (USB CDC devices, common for ZED-F9P over USB)
+- `/dev/ttyUSB0` (USB-to-serial adapters)
+
+List serial devices before and after connecting the receiver:
+
+```bash
+ls -l /dev/ttyACM* /dev/ttyUSB* /dev/ttyAMA* 2>/dev/null
+```
+
+You can also check kernel messages after plugging in:
+
+```bash
+dmesg | tail -n 50
+```
+
+Common device paths are `/dev/ttyACM0` (USB CDC) or `/dev/ttyUSB0` (USB-UART adapter).  
+If your config points to the wrong device (for example `/dev/ttyAMA0` when it does not exist), you will get errors like:
+
+```text
+could not open port /dev/ttyAMA0
+```
+
+Set the correct serial path in `config.yaml` for the mode you use, for example:
+
+```yaml
+base_local:
+  serial_port: /dev/ttyACM0
+```
+
+### 6. Start a mode
+
+```bash
+python -m rtkbox portal
+```
+
+Other modes are listed in the [Modes](#modes) section.
+
 ## Requirements
 
 - Python 3
@@ -9,12 +113,6 @@ Python utility for Raspberry Pi + Waveshare ZED-F9P RTK workflows.
 - Python packages:
   - `PyYAML`
   - `pyserial`
-
-Install Python deps:
-
-```bash
-pip install -r requirements.txt
-```
 
 ## Project layout
 
