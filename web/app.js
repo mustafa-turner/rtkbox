@@ -49,6 +49,10 @@ function isNmeaModeActive() {
   return getEffectiveMode() === "nmea";
 }
 
+function isAnyModeRunning() {
+  return Boolean(latestStatus.running && latestStatus.current_mode);
+}
+
 function setField(name, value) {
   const field = configForm.elements.namedItem(name);
   if (field) {
@@ -374,6 +378,10 @@ function renderTmodeStatus(status) {
 }
 
 async function readTmodeStatus() {
+  if (isAnyModeRunning()) {
+    setSaveMessage(`Receiver settings are locked while '${latestStatus.current_mode}' is running.`);
+    return;
+  }
   try {
     const status = await apiGet("/api/receiver/tmode3");
     renderTmodeStatus(status);
@@ -384,6 +392,10 @@ async function readTmodeStatus() {
 }
 
 async function setTmode(mode) {
+  if (isAnyModeRunning()) {
+    setSaveMessage(`Stop '${latestStatus.current_mode}' before changing receiver settings.`, true);
+    return;
+  }
   try {
     const payload = {
       mode,
@@ -414,6 +426,10 @@ async function setTmode(mode) {
 }
 
 async function saveReceiverConfig() {
+  if (isAnyModeRunning()) {
+    setSaveMessage(`Stop '${latestStatus.current_mode}' before saving receiver config.`, true);
+    return;
+  }
   try {
     await apiPost("/api/receiver/save", {});
     setSaveMessage("Receiver config saved to BBR/Flash.");
@@ -679,7 +695,9 @@ loadConfig()
     await refreshStatus();
     await refreshRecordings();
     await refreshReceiverRuntime();
-    await readTmodeStatus();
+    if (!isAnyModeRunning()) {
+      await readTmodeStatus();
+    }
   })
   .catch((error) => {
     statusLine.textContent = `Status: failed to load portal data | ${error.message}`;

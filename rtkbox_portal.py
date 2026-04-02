@@ -106,6 +106,10 @@ class AppState(Runner):
             self.stop_event.clear()
             self.log(f"Mode ended: {mode}")
 
+    def serial_mode_in_use(self):
+        with self._lock:
+            return self.worker is not None and self.worker.is_alive() and bool(self.current_mode)
+
 
 class PortalHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -125,9 +129,27 @@ class PortalHandler(BaseHTTPRequestHandler):
             self._send_json(self.server.app_state.snapshot())
             return
         if self.path == "/api/receiver/runtime":
+            if self.server.app_state.serial_mode_in_use():
+                self._send_json(
+                    {
+                        "available": False,
+                        "message": f"Receiver busy while '{self.server.app_state.current_mode}' is running.",
+                    },
+                    status=409,
+                )
+                return
             self._send_json(read_receiver_runtime(self.server.app_state.load_config()))
             return
         if self.path == "/api/receiver/tmode3":
+            if self.server.app_state.serial_mode_in_use():
+                self._send_json(
+                    {
+                        "ok": False,
+                        "error": f"Receiver busy while '{self.server.app_state.current_mode}' is running.",
+                    },
+                    status=409,
+                )
+                return
             self._send_json(read_receiver_tmode3(self.server.app_state.load_config()))
             return
         if self.path == "/api/recordings":
@@ -158,6 +180,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True})
                 return
             if self.path == "/api/receiver/tmode3/apply":
+                if state.serial_mode_in_use():
+                    raise RuntimeError(f"Receiver busy while '{state.current_mode}' is running.")
                 mode = str(data.get("mode", "")).strip().lower()
                 if mode not in {"survey", "fixed"}:
                     raise ValueError("mode must be 'survey' or 'fixed'")
@@ -174,6 +198,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": True, "status": status})
                 return
             if self.path == "/api/receiver/save":
+                if state.serial_mode_in_use():
+                    raise RuntimeError(f"Receiver busy while '{state.current_mode}' is running.")
                 save_receiver_config(state.load_config())
                 state.log("Receiver config saved to BBR/Flash.")
                 self._send_json({"ok": True})
