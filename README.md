@@ -464,6 +464,13 @@ Follow live logs:
 journalctl -u rtkbox-portal.service -f
 ```
 
+The service file already includes:
+
+- `Restart=always`
+- `RestartSec=3`
+
+That means if the `rtkbox` Python process exits or crashes, `systemd` will start it again automatically.
+
 ### Step 2. Configure portal autostart behavior
 
 In `config.yaml`:
@@ -512,6 +519,57 @@ Disable boot autostart:
 ```bash
 sudo systemctl disable rtkbox-portal.service
 ```
+
+### Step 5. Enable full-device watchdog reboot
+
+If you want the Pi to reboot when the whole OS becomes unresponsive, enable the Raspberry Pi hardware watchdog too.
+
+This is separate from `Restart=always`:
+
+- `Restart=always` recovers if the `rtkbox` app crashes
+- the hardware watchdog recovers if Linux or userspace hangs badly enough that normal service restarts cannot happen
+
+1. Enable the Raspberry Pi watchdog in boot config:
+
+```bash
+grep -q '^dtparam=watchdog=on$' /boot/firmware/config.txt || echo 'dtparam=watchdog=on' | sudo tee -a /boot/firmware/config.txt
+```
+
+2. Install the provided `systemd` watchdog manager config:
+
+```bash
+sudo mkdir -p /etc/systemd/system.conf.d
+sudo cp systemd/99-rtkbox-watchdog.conf /etc/systemd/system.conf.d/99-rtkbox-watchdog.conf
+```
+
+3. Reboot once to apply it:
+
+```bash
+sudo reboot
+```
+
+What this does:
+
+- `RuntimeWatchdogSec=15s` tells `systemd` to ping `/dev/watchdog` every few seconds
+- if the system stops scheduling `systemd` long enough, the hardware watchdog resets the Pi
+- `ShutdownWatchdogSec=2min` keeps a watchdog active during shutdown in case shutdown hangs
+
+Verify after reboot:
+
+```bash
+systemctl show -p RuntimeWatchdogUSec
+ls -l /dev/watchdog /dev/watchdog0
+```
+
+Expected result:
+
+- `RuntimeWatchdogUSec` should be non-zero
+- at least one watchdog device should exist, usually `/dev/watchdog0`
+
+Notes:
+
+- A watchdog reboot helps with hangs, but it does not protect against power loss.
+- If your image uses `/boot/config.txt` instead of `/boot/firmware/config.txt`, apply the same `dtparam=watchdog=on` line there instead.
 
 ## Config reference
 
