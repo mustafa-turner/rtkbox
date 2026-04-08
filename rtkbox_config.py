@@ -73,6 +73,11 @@ def build_ntrip_url(section, scheme):
     return f"{scheme}://{user}:{password}@{host}:{port}/{mountpoint}"
 
 
+def append_stream_format(stream_url, fmt):
+    fmt = str(fmt or "").strip()
+    return f"{stream_url}#{fmt}" if fmt else stream_url
+
+
 def build_mode_streams(mode, cfg):
     serial_url = build_serial_url(cfg)
 
@@ -88,9 +93,10 @@ def build_mode_streams(mode, cfg):
 
     if mode == "base-ntrip":
         caster = get_required(cfg, "caster")
-        # Pass through receiver stream to caster (u-center-like process).
-        # Receiver message profile decides what gets published.
-        return serial_url, build_ntrip_url(caster, "ntrips")
+        in_url = append_stream_format(serial_url, "ubx")
+        out_url = build_ntrip_url(caster, "ntrips")
+        out_url = append_stream_format(out_url, "rtcm3")
+        return in_url, out_url
 
     if mode == "rover-local":
         rover_local = get_required(cfg, "rover_local")
