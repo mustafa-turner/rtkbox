@@ -88,6 +88,8 @@ def build_mode_streams(mode, cfg):
 
     if mode == "base-ntrip":
         caster = get_required(cfg, "caster")
+        # Pass through receiver stream to caster (u-center-like process).
+        # Receiver message profile decides what gets published.
         return serial_url, build_ntrip_url(caster, "ntrips")
 
     if mode == "rover-local":
